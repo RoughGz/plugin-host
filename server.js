@@ -6,6 +6,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { Readable } = require("node:stream");
 const { PluginRuntime, callPlugin } = require("./lib/plugin-host");
+const { installPlugin, normalizePluginUrl } = require("./lib/plugin-url");
 
 const ROOT = __dirname;
 const PLUGINS_DIR = path.join(ROOT, "plugins");
@@ -328,6 +329,83 @@ function sendJson(res, status, obj) {
   res.end(body);
 }
 
+// ---------- web UI (paste a plugin URL) ----------
+
+function homePage() {
+  const items = [];
+  for (const [name, p] of plugins) {
+    items.push(
+      "<li><code>" +
+        name +
+        "</code> <span style='color:#666'>(" +
+        (p.descriptor.name || "no plugin.json") +
+        ")</span> <button onclick='removePlugin(\"" +
+        name +
+        "\")'>remove</button></li>",
+    );
+  }
+  return (
+    "<!doctype html><html><head><meta charset='utf-8'><title>" +
+    (config.name || "Plugin Host") +
+    "</title></head><body style='font-family:system-ui;max-width:640px;margin:40px auto'>" +
+    "<h2>" +
+    (config.name || "Plugin Host") +
+    " — add a plugin</h2>" +
+    "<p style='color:#666'>Paste a GitHub tree/blob folder URL or a raw plugin.js URL, then press Add. The plugin is installed and live immediately.</p>" +
+    "<form id='f' style='display:flex;gap:8px'>" +
+    "<input id='u' style='flex:1;padding:8px' placeholder='https://github.com/user/repo/tree/main/plugin-folder'>" +
+    "<button style='padding:8px 16px'>Add plugin</button></form>" +
+    "<p id='msg'></p><h3>Installed</h3><ul id='list'>" +
+    (items.length ? items.join("") : "<li style='color:#666'>none yet</li>") +
+    "</ul>" +
+    "<p style='color:#999;font-size:12px'>Stremio: open /manifest.json in Stremio → Addon → Custom URL.</p>" +
+    "<script>" +
+    "const f=document.getElementById('f'),u=document.getElementById('u'),m=document.getElementById('msg');" +
+    "f.onsubmit=async e=>{e.preventDefault();m.textContent='installing...';" +
+    "const r=await fetch('/add-plugin',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:u.value})});" +
+    "const j=await r.json();m.textContent=j.error?'FAILED: '+j.error:'ok — '+j.name+' is live';if(!j.error)setTimeout(()=>location.reload(),800)};" +
+    "async function removePlugin(n){await fetch('/remove-plugin/'+n,{method:'DELETE'});location.reload()}" +
+    "</script></body></html>"
+  );
+}
+
+function readBody(req) {
+  return new Promise((resolve) => {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => resolve(body));
+  });
+}
+
+async function handleAddPlugin(req, res) {
+  try {
+    const body = await readBody(req);
+    const raw =
+      (JSON.parse(body).url || "").trim() ||
+      new URLSearchParams(body).get("url") ||
+      "";
+    if (!raw) return sendJson(res, 400, { error: "missing url" });
+    const { name } = await installPlugin(raw, PLUGINS_DIR);
+    loadPlugins();
+    await warmAll(true);
+    sendJson(res, 200, { ok: true, name, url: normalizePluginUrl(raw) });
+  } catch (e) {
+    sendJson(res, 400, { error: e.message });
+  }
+}
+
+function handleRemovePlugin(res, name) {
+  if (!/^[a-zA-Z0-9_-]+$/.test(name) || name.startsWith("__"))
+    return sendJson(res, 400, { error: "invalid plugin name" });
+  const dir = path.join(PLUGINS_DIR, name);
+  if (!fs.existsSync(path.join(dir, "plugin.js")))
+    return sendJson(res, 404, { error: "no plugin named " + name });
+  fs.rmSync(dir, { recursive: true, force: true });
+  loadPlugins();
+  warmAll(true).catch(() => {});
+  sendJson(res, 200, { ok: true, removed: name });
+}
+
 async function handleCatalog(req, res, type, catalogId, search) {
   const found = findCatalog(catalogId);
   if (!found)
@@ -508,10 +586,22 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "OPTIONS") {
       res.writeHead(204, {
         "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "GET,OPTIONS",
+        "Access-Control-Allow-Methods": "GET,POST,DELETE,OPTIONS",
         "Access-Control-Allow-Headers": "*",
       });
       return res.end();
+    }
+    // web UI: paste a plugin URL → installed live (hot reload picks it up)
+    if (url === "/") {
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      return res.end(homePage());
+    }
+    if (url === "/add-plugin" && req.method === "POST") {
+      return handleAddPlugin(req, res);
+    }
+    const removeM = /^\/remove-plugin\/([^/]+)$/.exec(url);
+    if (removeM && req.method === "DELETE") {
+      return handleRemovePlugin(res, removeM[1]);
     }
     if (url === "/manifest.json") {
       return sendJson(res, 200, {
@@ -560,7 +650,6 @@ async function boot() {
 // hot reload: any change under plugins/ → reload + re-warm
 let reloadTimer = null;
 fs.watch(PLUGINS_DIR, { recursive: true }, (event, filename) => {
-  console.log("watch event:", event, filename);
   clearTimeout(reloadTimer);
   reloadTimer = setTimeout(async () => {
     console.log("plugins changed — reloading");

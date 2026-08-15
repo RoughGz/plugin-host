@@ -9,20 +9,31 @@ Every plugin runs in its own **worker thread + `vm` context**: no `process`, no
 bridge. Hung plugins (infinite loops) are killed by a call timeout and
 automatically respawned.
 
-## Add a plugin by pasting a raw URL
+## Add a plugin by pasting a URL
 
-```bash
-node add-plugin.js https://raw.githubusercontent.com/likhithkrishna1103-tech/Hindmovie/main/anikage/plugin.js
+**Easiest — paste a link into the addon itself.** Open the addon's web page (`/`
+on your deployed URL), paste any of these into the box, press Add — it's
+installed and live immediately, no code copied anywhere:
+
+```
+https://github.com/likhithkrishna1103-tech/Hindmovie/tree/main/zinkmovies
+https://github.com/user/repo/blob/main/folder/plugin.js
+https://raw.githubusercontent.com/user/repo/main/folder/plugin.js
 ```
 
-Downloads `plugin.js` (and its `plugin.json` if present) into `plugins/<name>/`.
-The running server hot-reloads — no restart needed. Add several at once, or list
-installed:
+Same thing from the CLI (also lets you commit plugins into the repo so they
+survive redeploys):
 
 ```bash
+node add-plugin.js https://github.com/likhithkrishna1103-tech/Hindmovie/tree/main/zinkmovies
 node add-plugin.js <url1> <url2> ...
 node add-plugin.js --list
 ```
+
+Remove from the web page (Remove button) or
+`curl -X DELETE <base>/remove-plugin/<name>`. On Render the disk is ephemeral:
+plugins added via the web page vanish on the next redeploy — commit them into
+`plugins/` if you want them permanent.
 
 Any plugin that exports `getHome` / `search` / `load` / `loadStreams` works:
 getHome sections become catalogs, load feeds meta (with episodes), loadStreams

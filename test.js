@@ -104,6 +104,52 @@ function domTests() {
   check("unpackJs", unpackJs(packed) === "hello brave world");
 }
 
+// ---------- 1.5 URL normalization unit tests ----------
+
+function urlTests() {
+  console.log("plugin-url:");
+  const { normalizePluginUrl } = require("./lib/plugin-url");
+  const cases = [
+    // github tree folder URL → raw plugin.js (the "paste a link" flow)
+    [
+      "https://github.com/likhithkrishna1103-tech/Hindmovie/tree/main/zinkmovies",
+      "https://raw.githubusercontent.com/likhithkrishna1103-tech/Hindmovie/main/zinkmovies/plugin.js",
+    ],
+    // github blob URL straight to plugin.js
+    [
+      "https://github.com/likhithkrishna1103-tech/Hindmovie/blob/main/anikage/plugin.js",
+      "https://raw.githubusercontent.com/likhithkrishna1103-tech/Hindmovie/main/anikage/plugin.js",
+    ],
+    // raw URL as-is
+    [
+      "https://raw.githubusercontent.com/likhithkrishna1103-tech/Hindmovie/main/anikage/plugin.js",
+      "https://raw.githubusercontent.com/likhithkrishna1103-tech/Hindmovie/main/anikage/plugin.js",
+    ],
+    // raw folder URL (missing plugin.js)
+    [
+      "https://raw.githubusercontent.com/likhithkrishna1103-tech/Hindmovie/main/anikage/",
+      "https://raw.githubusercontent.com/likhithkrishna1103-tech/Hindmovie/main/anikage/plugin.js",
+    ],
+    // trailing slash + query noise
+    [
+      "https://github.com/likhithkrishna1103-tech/Hindmovie/tree/main/zinkmovies/?tab=readme-ov-file",
+      "https://raw.githubusercontent.com/likhithkrishna1103-tech/Hindmovie/main/zinkmovies/plugin.js",
+    ],
+  ];
+  for (const [input, expected] of cases) {
+    check(
+      "normalize " + input.slice(0, 60) + "...",
+      normalizePluginUrl(input) === expected,
+      "got: " + normalizePluginUrl(input),
+    );
+  }
+  check(
+    "normalize rejects junk",
+    normalizePluginUrl("not a url") === null &&
+      normalizePluginUrl("https://example.com/foo") === null,
+  );
+}
+
 // ---------- 2. server integration ----------
 
 function sleep(ms) {
@@ -122,6 +168,7 @@ async function waitFor(predicate, timeoutMs, what) {
 
 async function main() {
   domTests();
+  urlTests();
 
   const testDir = path.join(__dirname, "plugins", "__test__");
   const hangDir = path.join(__dirname, "plugins", "__hang__");
@@ -312,6 +359,89 @@ async function main() {
       console.log(
         "  no plugins installed to test (run: node add-plugin.js <plugin.js raw URL>)",
       );
+    }
+
+    // web UI flow: POST a github tree URL → plugin goes live → DELETE removes it
+    console.log("web add/remove:");
+    try {
+      const treeUrl =
+        "https://github.com/likhithkrishna1103-tech/Hindmovie/tree/main/zinkmovies";
+      const addRes = await fetch(base + "/add-plugin", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: treeUrl }),
+      });
+      const add = await addRes.json();
+      check(
+        "web add plugin (" + treeUrl.slice(0, 50) + "...)",
+        addRes.ok && add.ok && add.name === "zinkmovies",
+        JSON.stringify(add),
+      );
+      const live = await waitFor(
+        async () => {
+          try {
+            const m = await getJson(base + "/manifest.json");
+            return m.catalogs.some((c) => c.id.startsWith("zinkmovies_"));
+          } catch (e) {
+            return false;
+          }
+        },
+        30000,
+        "zinkmovies catalog in manifest",
+      );
+      check("zinkmovies live after web add", live);
+      if (live) {
+        try {
+          const m = await getJson(base + "/manifest.json");
+          const zkCat = m.catalogs.find((c) => c.id.startsWith("zinkmovies_"));
+          const items = await getJson(
+            base + "/catalog/" + zkCat.type + "/" + zkCat.id + ".json",
+          );
+          const item = (items.metas || [])[0];
+          check(
+            "zinkmovies catalog items",
+            !!item && !!item.name,
+            JSON.stringify(item),
+          );
+          if (item) {
+            const streams = await getJson(
+              base +
+                "/stream/" +
+                (item.type || zkCat.type) +
+                "/" +
+                encodeURIComponent(item.id) +
+                ".json",
+            );
+            check(
+              "zinkmovies streams",
+              Array.isArray(streams.streams) && streams.streams.length > 0,
+              JSON.stringify(streams).slice(0, 200),
+            );
+          }
+        } catch (e) {
+          warn("zinkmovies e2e: " + e.message);
+        }
+      }
+      const rmRes = await fetch(base + "/remove-plugin/zinkmovies", {
+        method: "DELETE",
+      });
+      const rm = await rmRes.json();
+      check("web remove plugin", rmRes.ok && rm.ok, JSON.stringify(rm));
+      const gone = await waitFor(
+        async () => {
+          try {
+            const m = await getJson(base + "/manifest.json");
+            return !m.catalogs.some((c) => c.id.startsWith("zinkmovies_"));
+          } catch (e) {
+            return false;
+          }
+        },
+        15000,
+        "zinkmovies gone from manifest",
+      );
+      check("zinkmovies gone after remove", gone);
+    } catch (e) {
+      warn("web add/remove: " + e.message);
     }
 
     // cleanup

@@ -1,0 +1,7 @@
+{
+	"id": "com.stremio.pluginhost",
+	"name": "Plugin Host",
+	"description": "Skystream plugin host — add any plugin by pasting its plugin.js URL.",
+	"logo": "",
+	"publicUrl": ""
+}

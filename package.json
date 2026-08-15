@@ -1,0 +1,15 @@
+{
+	"name": "plugin-host",
+	"version": "1.0.0",
+	"description": "Stremio addon — sandboxed host for Skystream plugins (zero dependencies)",
+	"main": "server.js",
+	"scripts": {
+		"start": "node server.js",
+		"test": "node test.js",
+		"add-plugin": "node add-plugin.js"
+	},
+	"engines": {
+		"node": ">=18"
+	},
+	"license": "MIT"
+}

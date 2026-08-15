@@ -25,8 +25,6 @@ async function getJson(url) {
   return res.json();
 }
 
-// ---------- 1. mini-dom unit tests ----------
-
 function domTests() {
   console.log("mini-dom:");
   const doc = parseHtml(
@@ -150,8 +148,6 @@ function urlTests() {
   );
 }
 
-// ---------- 2. server integration ----------
-
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -178,7 +174,7 @@ async function main() {
   fs.mkdirSync(hangDir, { recursive: true });
   fs.writeFileSync(
     path.join(testDir, "plugin.js"),
-    'globalThis.getHome = function(cb){ cb({success:true, data:{Leaks:[{url:"https://x.test/1", title: "proc=" + typeof process + " require=" + typeof require + " fs=" + typeof fs + " buffer=" + typeof Buffer + " fetch=" + typeof fetch}]}}); };\n' +
+    'globalThis.getHome = function(cb){ var esc = "?"; try { Buffer.constructor("return 1")(); esc = "escaped"; } catch (e) { esc = "blocked"; } cb({success:true, data:{Leaks:[{url:"https://x.test/1", title: "proc=" + typeof process + " require=" + typeof require + " fs=" + typeof fs + " buffer=" + typeof Buffer + " fetch=" + typeof fetch + " esc=" + esc}]}}); };\n' +
       'globalThis.load = function(url, cb){ cb({success:true, data:{url:url, title:"Isolation Meta", type:"movie", episodes:[{name:"E1", url:"https://x.test/1/e", season:1, episode:1}]}}); };\n' +
       'globalThis.loadStreams = function(url, cb){ cb({success:true, data:[{url:"https://x.test/stream.mp4", source:"Test", quality:"1080p"}]}); };\n',
   );
@@ -282,6 +278,11 @@ async function main() {
     check(
       "sandbox has no raw fetch",
       first.name && first.name.includes("fetch=undefined"),
+    );
+    check(
+      "sandbox blocks constructor escape",
+      first.name && first.name.includes("esc=blocked"),
+      JSON.stringify(first.name),
     );
 
     // meta + stream round-trip on the isolation plugin
@@ -394,8 +395,7 @@ async function main() {
     }
 
     // web UI flow: POST a github tree URL → plugin goes live → DELETE removes it.
-    // Drop zinkmovies from plugins.txt first so the file reload doesn't
-    // re-install it after the web remove (file is the source of truth).
+    // The server syncs plugins.txt on add/remove (file is the source of truth).
     console.log("web add/remove:");
     try {
       fs.writeFileSync(
@@ -481,8 +481,6 @@ async function main() {
     } catch (e) {
       warn("web add/remove: " + e.message);
     }
-
-    // cleanup
   } finally {
     server.kill();
     fs.rmSync(testDir, { recursive: true, force: true });

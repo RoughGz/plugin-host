@@ -1,13 +1,21 @@
 # Plugin Host
 
 A Stremio addon that runs [Skystream](https://github.com/akashdh11/skystream)
-plugins in a fully sandboxed environment — **zero dependencies** (Node ≥ 18
-built-ins only).
+plugins in a sandboxed environment — **zero dependencies** (Node ≥ 18 built-ins
+only).
 
 Every plugin runs in its own **worker thread + `vm` context**: no `process`, no
 `require`, no `fs`, no network except through the host's `http_get`/`http_post`
 bridge. Hung plugins (infinite loops) are killed by a call timeout and
 automatically respawned.
+
+> **Security note (read this).** The `vm` sandbox is _not_ a security boundary
+> on its own — a malicious plugin could escape it and reach the worker thread.
+> Two layers make that impractical here:
+> `--disallow-code-generation-from-strings` is set at runtime (blocks the
+> classic `Buffer.constructor("return process")()` escape, while plugin code and
+> in-sandbox `eval` still work), and installs are **operator-only**
+> (`ADMIN_TOKEN` on the add/remove endpoints). Only install plugins you trust.
 
 ## Add a plugin by pasting a URL
 
@@ -25,16 +33,28 @@ https://github.com/likhithkrishna1103-tech/Hindmovie/tree/main/anikage
 Any URL form works: `github.com/.../tree/<branch>/<folder>`,
 `github.com/.../blob/<branch>/<folder>/plugin.js`,
 `raw.githubusercontent.com/.../plugin.js`. Lines starting with `#` are comments.
+Only GitHub URLs are installable.
 
 Also available if you prefer clicking: the addon's web page (`/`) has a
 paste-a-URL box with add/remove buttons — handy on a deployed Render app when
-you don't want to push. Plugins added that way appear after the `plugins.txt`
-ones and vanish on the next redeploy (Render's disk is wiped); plugins from
-`plugins.txt` are installed fresh at every boot.
+you don't want to push. Web/CLI adds and removals **sync `plugins.txt`**, so
+what you add survives redeploys and what you remove stays removed; `plugins.txt`
+is always the source of truth for what's installed.
 
 Any plugin that exports `getHome` / `search` / `load` / `loadStreams` works:
 getHome sections become catalogs, load feeds meta (with episodes), loadStreams
 feeds streams.
+
+## Protect add/remove
+
+The add/remove endpoints are unauthenticated unless you set a token:
+
+```bash
+export ADMIN_TOKEN=something-long-and-random   # or config.json: "adminToken"
+```
+
+With a token set, web/CLI adds and removes require
+`Authorization: Bearer <token>` (or `x-admin-token`). Render env var works too.
 
 ## Run
 

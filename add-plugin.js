@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 // Add a Skystream plugin by pasting a URL:
 //   node add-plugin.js https://github.com/<user>/<repo>/tree/<branch>/<folder>
-//   node add-plugin.js https://raw.githubusercontent.com/<user>/<repo>/main/<folder>/plugin.js
 // Downloads plugin.js (and sibling plugin.json if present) into plugins/<folder>/.
 // The running server hot-reloads automatically. Usage: node add-plugin.js <url> [<url>...] | --list
 const fs = require("node:fs");
 const path = require("node:path");
-const { installPlugin } = require("./lib/plugin-url");
+const { installPlugin, appendToPluginsTxt } = require("./lib/plugin-url");
 
 const PLUGINS_DIR = path.join(__dirname, "plugins");
+const PLUGINS_FILE = path.join(__dirname, "plugins.txt");
 
 function list() {
   console.log("installed plugins:");
@@ -28,7 +28,7 @@ function list() {
       );
       name = pj.name || name;
     } catch (e) {
-      /* no plugin.json */
+      // no plugin.json
     }
     console.log("  - " + entry.name + "  (" + name + ")");
   }
@@ -50,6 +50,7 @@ function list() {
   for (const url of args) {
     try {
       const { name } = await installPlugin(url, PLUGINS_DIR);
+      appendToPluginsTxt(PLUGINS_FILE, url); // keep plugins.txt in sync (survives redeploy)
       console.log(
         'added plugin "' + name + '" → plugins/' + name + "/plugin.js",
       );

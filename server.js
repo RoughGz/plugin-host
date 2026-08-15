@@ -1,15 +1,15 @@
-// Stremio addon engine — Skystream plugin host. Zero-dependency Node.js server.
-// Every folder under plugins/ (plugin.js + optional plugin.json) is a source:
-// getHome sections → catalogs, load → meta, loadStreams → streams.
 const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
+const dns = require("node:dns").promises;
 const { Readable } = require("node:stream");
 const { PluginRuntime, callPlugin } = require("./lib/plugin-host");
 const {
   installPlugin,
   normalizePluginUrl,
   pluginNameFromUrl,
+  appendToPluginsTxt,
+  dropFromPluginsTxt,
 } = require("./lib/plugin-url");
 
 const ROOT = __dirname;
@@ -17,6 +17,8 @@ const PLUGINS_DIR = path.join(ROOT, "plugins");
 const PLUGINS_FILE = path.join(ROOT, "plugins.txt"); // one plugin URL per line; order = catalog order
 const PORT = process.env.PORT || 3999;
 const CACHE_TTL_MS = 10 * 60 * 1000;
+const META_CACHE_MAX = 200;
+const MAX_BODY_BYTES = 1024 * 1024;
 const DEFAULT_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36";
 
@@ -27,9 +29,9 @@ try {
   console.error("config.json missing/invalid:", e.message);
 }
 
-// ---------- plugin registry ----------
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || config.adminToken || null;
 
-const plugins = new Map(); // name -> { name, dir, descriptor, runtime, sections: Map<slug,{name,type,items}>, sectionsTs, metaCache: Map<id,{ts,item}> }
+const plugins = new Map(); // name -> { name, dir, descriptor, runtime, sections, sectionsTs, metaCache }
 
 function publicBase(req) {
   return (
@@ -160,13 +162,8 @@ function mapStream(s, base) {
   return out;
 }
 
-// ---------- plugin lifecycle ----------
+const pluginOrder = []; // plugins.txt order = catalog order (file plugins first, web/CLI adds after)
 
-const pluginOrder = []; // plugin names in plugins.txt order → catalog order (file first, web/CLI adds after)
-
-// Read plugins.txt (one plugin URL per line, # comments allowed) and install
-// any plugin whose folder is not present yet. Never throws — boot must not
-// depend on the network.
 async function installFromUrlsFile() {
   if (!fs.existsSync(PLUGINS_FILE)) return;
   let lines;
@@ -185,7 +182,7 @@ async function installFromUrlsFile() {
       continue;
     }
     if (!pluginOrder.includes(name)) pluginOrder.push(name);
-    if (fs.existsSync(path.join(PLUGINS_DIR, name, "plugin.js"))) continue; // already installed
+    if (fs.existsSync(path.join(PLUGINS_DIR, name, "plugin.js"))) continue;
     try {
       await installPlugin(url, PLUGINS_DIR);
       console.log("installed plugin from plugins.txt:", name);
@@ -210,7 +207,7 @@ function loadPlugins() {
     try {
       descriptor = JSON.parse(fs.readFileSync(jsonPath, "utf8"));
     } catch (e) {
-      /* plugin.json optional */
+      // plugin.json optional
     }
     const code = fs.readFileSync(jsPath, "utf8");
     const plugin = {
@@ -225,16 +222,10 @@ function loadPlugins() {
       }),
     };
     plugins.set(entry.name, plugin);
-    console.log(
-      "loaded plugin:",
-      entry.name,
-      "| api:",
-      plugin.runtime.api.join(", "),
-    );
+    console.log("loaded plugin:", entry.name);
   }
   if (!found) console.warn("no plugins found in", PLUGINS_DIR);
-  // reorder: plugins listed in plugins.txt keep their file order; anything else
-  // (web/CLI adds) goes after. Keeps catalogs "1st one top, 2nd below".
+  // file plugins keep plugins.txt order; web/CLI adds go after (catalog order = file order)
   const ordered = [];
   for (const name of pluginOrder) {
     const p = plugins.get(name);
@@ -248,40 +239,47 @@ function loadPlugins() {
 }
 
 async function warmPlugin(plugin, force) {
-  if (
-    !force &&
-    plugin.sectionsTs &&
-    Date.now() - plugin.sectionsTs < CACHE_TTL_MS
-  )
-    return;
-  plugin.sections.clear();
-  plugin.metaCache.clear();
-  const res = await callPlugin(plugin.runtime, "getHome", []);
-  if (!res.success || !res.data || typeof res.data !== "object") {
-    console.warn(
+  if (plugin.warming) return plugin.warming;
+  plugin.warming = (async () => {
+    if (
+      !force &&
+      plugin.sectionsTs &&
+      Date.now() - plugin.sectionsTs < CACHE_TTL_MS
+    )
+      return;
+    plugin.sections.clear();
+    plugin.metaCache.clear();
+    const res = await callPlugin(plugin.runtime, "getHome", []);
+    if (!res.success || !res.data || typeof res.data !== "object") {
+      plugin.sectionsTs = Date.now(); // cache the failure so catalogs don't re-call on every request
+      console.warn(
+        "plugin",
+        plugin.name,
+        "getHome failed:",
+        res.message || "no data",
+      );
+      return;
+    }
+    const sectionMap = Array.isArray(res.data)
+      ? { [plugin.descriptor.name || plugin.name]: res.data }
+      : res.data;
+    for (const [name, items] of Object.entries(sectionMap)) {
+      if (!Array.isArray(items) || !items.length) continue;
+      const firstType = mapType(items[0].type);
+      plugin.sections.set(slugify(name), { name, type: firstType, items });
+    }
+    plugin.sectionsTs = Date.now();
+    rebuildPrefixMap();
+    console.log(
       "plugin",
       plugin.name,
-      "getHome failed:",
-      res.message || "no data",
+      "catalogs:",
+      [...plugin.sections.keys()].join(", ") || "(none)",
     );
-    return;
-  }
-  const sectionMap = Array.isArray(res.data)
-    ? { [plugin.descriptor.name || plugin.name]: res.data }
-    : res.data;
-  for (const [name, items] of Object.entries(sectionMap)) {
-    if (!Array.isArray(items) || !items.length) continue;
-    const firstType = mapType(items[0].type);
-    plugin.sections.set(slugify(name), { name, type: firstType, items });
-  }
-  plugin.sectionsTs = Date.now();
-  rebuildPrefixMap();
-  console.log(
-    "plugin",
-    plugin.name,
-    "catalogs:",
-    [...plugin.sections.keys()].join(", ") || "(none)",
-  );
+  })().finally(() => {
+    plugin.warming = null;
+  });
+  return plugin.warming;
 }
 
 async function warmAll(force) {
@@ -306,9 +304,7 @@ function rebuildPrefixMap() {
         try {
           const origin = new URL(item.url).origin;
           prefixMap.set(origin, p.name);
-        } catch (e) {
-          /* non-URL ids ignored */
-        }
+        } catch (e) {}
       }
     }
   }
@@ -361,6 +357,17 @@ async function getRawItem(plugin, metaId) {
   if (cached && Date.now() - cached.ts < CACHE_TTL_MS) return cached.item;
   const res = await callPlugin(plugin.runtime, "load", [metaId]);
   if (!res.success || !res.data || typeof res.data !== "object") return null;
+  if (plugin.metaCache.size >= META_CACHE_MAX) {
+    let oldestKey = null,
+      oldestTs = Infinity;
+    for (const [k, v] of plugin.metaCache) {
+      if (v.ts < oldestTs) {
+        oldestTs = v.ts;
+        oldestKey = k;
+      }
+    }
+    if (oldestKey) plugin.metaCache.delete(oldestKey);
+  }
   plugin.metaCache.set(metaId, { ts: Date.now(), item: res.data });
   return res.data;
 }
@@ -378,27 +385,34 @@ function sendJson(res, status, obj) {
   res.end(body);
 }
 
-// ---------- web UI (paste a plugin URL) ----------
+function esc(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
 
 function homePage() {
   const items = [];
   for (const [name, p] of plugins) {
     items.push(
       "<li><code>" +
-        name +
+        esc(name) +
         "</code> <span style='color:#666'>(" +
-        (p.descriptor.name || "no plugin.json") +
+        esc(p.descriptor.name || "no plugin.json") +
         ")</span> <button onclick='removePlugin(\"" +
-        name +
+        esc(name) +
         "\")'>remove</button></li>",
     );
   }
+  const title = esc(config.name || "Plugin Host");
   return (
     "<!doctype html><html><head><meta charset='utf-8'><title>" +
-    (config.name || "Plugin Host") +
+    title +
     "</title></head><body style='font-family:system-ui;max-width:640px;margin:40px auto'>" +
     "<h2>" +
-    (config.name || "Plugin Host") +
+    title +
     " — add a plugin</h2>" +
     "<p style='color:#666'>Paste a GitHub tree/blob folder URL or a raw plugin.js URL, then press Add. The plugin is installed and live immediately.</p>" +
     "<form id='f' style='display:flex;gap:8px'>" +
@@ -419,14 +433,37 @@ function homePage() {
 }
 
 function readBody(req) {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     let body = "";
-    req.on("data", (c) => (body += c));
-    req.on("end", () => resolve(body));
+    let done = false;
+    req.on("data", (c) => {
+      if (done) return;
+      body += c;
+      if (Buffer.byteLength(body) > MAX_BODY_BYTES) {
+        done = true;
+        reject(new Error("request body too large"));
+        req.destroy();
+      }
+    });
+    req.on("end", () => {
+      if (!done) resolve(body);
+    });
+    req.on("error", reject);
   });
 }
 
+function requireAdmin(req) {
+  if (!ADMIN_TOKEN) return true; // no token configured → open (single-tenant/trusted)
+  const auth = req.headers["authorization"] || "";
+  const token = auth.startsWith("Bearer ")
+    ? auth.slice(7)
+    : req.headers["x-admin-token"] || "";
+  return token === ADMIN_TOKEN;
+}
+
 async function handleAddPlugin(req, res) {
+  if (!requireAdmin(req))
+    return sendJson(res, 401, { error: "unauthorized (set ADMIN_TOKEN)" });
   try {
     const body = await readBody(req);
     const raw =
@@ -434,24 +471,28 @@ async function handleAddPlugin(req, res) {
       new URLSearchParams(body).get("url") ||
       "";
     if (!raw) return sendJson(res, 400, { error: "missing url" });
-    const { name } = await installPlugin(raw, PLUGINS_DIR);
-    loadPlugins();
-    await warmAll(true);
-    sendJson(res, 200, { ok: true, name, url: normalizePluginUrl(raw) });
+    const url = normalizePluginUrl(raw);
+    const { name } = await installPlugin(url, PLUGINS_DIR);
+    // keep plugins.txt in sync so the plugin survives a redeploy; the file
+    // watcher (debounced 500ms) reloads and re-warms once
+    appendToPluginsTxt(PLUGINS_FILE, url);
+    sendJson(res, 200, { ok: true, name, url });
   } catch (e) {
     sendJson(res, 400, { error: e.message });
   }
 }
 
-function handleRemovePlugin(res, name) {
+function handleRemovePlugin(req, res, name) {
+  if (!requireAdmin(req))
+    return sendJson(res, 401, { error: "unauthorized (set ADMIN_TOKEN)" });
   if (!/^[a-zA-Z0-9_-]+$/.test(name) || name.startsWith("__"))
     return sendJson(res, 400, { error: "invalid plugin name" });
   const dir = path.join(PLUGINS_DIR, name);
   if (!fs.existsSync(path.join(dir, "plugin.js")))
     return sendJson(res, 404, { error: "no plugin named " + name });
   fs.rmSync(dir, { recursive: true, force: true });
-  loadPlugins();
-  warmAll(true).catch(() => {});
+  // without dropping the plugins.txt line the file-based reload reinstalls it
+  dropFromPluginsTxt(PLUGINS_FILE, name);
   sendJson(res, 200, { ok: true, removed: name });
 }
 
@@ -527,6 +568,54 @@ async function handleStream(req, res, type, id) {
 
 // ---------- magic-URL proxy ----------
 
+function isPrivateIp(ip) {
+  if (ip === "0.0.0.0" || ip === "::" || ip === "::1") return true;
+  if (/^127\./.test(ip) || /^10\./.test(ip) || /^192\.168\./.test(ip))
+    return true;
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(ip)) return true;
+  if (/^169\.254\./.test(ip)) return true; // link-local incl. cloud metadata
+  if (/^fe80:/i.test(ip) || /^f[cd]/i.test(ip)) return true;
+  return false;
+}
+
+async function isPrivateHost(hostname) {
+  if (hostname === "localhost" || hostname.endsWith(".local")) return true;
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(hostname) || hostname.includes(":"))
+    return isPrivateIp(hostname);
+  try {
+    const { address } = await dns.lookup(hostname);
+    return isPrivateIp(address);
+  } catch (e) {
+    return true; // unresolvable → refuse
+  }
+}
+
+// fetch with per-hop SSRF check and no silent cross-host redirects
+async function fetchSafe(url, headers, maxHops) {
+  maxHops = maxHops || 5;
+  let cur = url;
+  for (let i = 0; i < maxHops; i++) {
+    let u;
+    try {
+      u = new URL(cur);
+    } catch (e) {
+      throw new Error("invalid url");
+    }
+    if (u.protocol !== "https:" && u.protocol !== "http:")
+      throw new Error("bad scheme");
+    if (await isPrivateHost(u.hostname)) throw new Error("blocked host");
+    const res = await fetch(cur, { headers, redirect: "manual" });
+    if (res.status >= 300 && res.status < 400) {
+      const loc = res.headers.get("location");
+      if (!loc) return res;
+      cur = new URL(loc, cur).href;
+      continue;
+    }
+    return res;
+  }
+  throw new Error("too many redirects");
+}
+
 async function proxyFetch(url, extraHeaders, req, res) {
   const headers = { ...extraHeaders };
   if (!headers["User-Agent"] && !headers["user-agent"])
@@ -534,22 +623,33 @@ async function proxyFetch(url, extraHeaders, req, res) {
   if (!headers["Accept-Encoding"] && !headers["accept-encoding"])
     headers["Accept-Encoding"] = "identity";
   if (req.headers.range) headers["Range"] = req.headers.range;
+  const isHead = req.method === "HEAD";
   try {
-    const upstream = await fetch(url, { headers, redirect: "follow" });
+    const upstream = await fetchSafe(url, {
+      ...headers,
+      method: isHead ? "HEAD" : "GET",
+    });
     const outHeaders = {
       "Content-Type":
         upstream.headers.get("content-type") || "application/octet-stream",
       "Cache-Control": "no-store",
       "Access-Control-Allow-Origin": "*",
     };
-    if (upstream.headers.get("content-length"))
+    // forward Content-Length only when the body wasn't decompressed
+    const enc = upstream.headers.get("content-encoding");
+    if (upstream.headers.get("content-length") && !enc)
       outHeaders["Content-Length"] = upstream.headers.get("content-length");
     if (upstream.headers.get("content-range"))
       outHeaders["Content-Range"] = upstream.headers.get("content-range");
     if (upstream.headers.get("accept-ranges"))
       outHeaders["Accept-Ranges"] = upstream.headers.get("accept-ranges");
     res.writeHead(upstream.status, outHeaders);
-    Readable.fromWeb(upstream.body).pipe(res);
+    if (isHead || !upstream.body) return res.end();
+    const stream = Readable.fromWeb(upstream.body);
+    stream.on("error", () => res.end()); // upstream dropped mid-body → don't crash the process
+    res.on("close", () => stream.destroy());
+    res.on("error", () => stream.destroy());
+    stream.pipe(res);
   } catch (e) {
     if (!res.headersSent)
       sendJson(res, 502, { error: "proxy fetch failed: " + e.message });
@@ -571,7 +671,7 @@ async function handleProxy(req, res) {
   const base = publicBase(req);
 
   if (decoded.startsWith("#EXTM3U")) {
-    // m3u8 playlist: rewrite magic-wrapped segment URIs to this proxy
+    // rewrite magic-wrapped segment URIs to this proxy
     const rewritten = decoded
       .split("\n")
       .map((line) => {
@@ -620,13 +720,11 @@ async function handleProxy(req, res) {
     try {
       extraHeaders["Referer"] = new URL(url).origin + "/";
     } catch (e) {
-      /* ignore */
+      // invalid url; fetchSafe reports it
     }
   }
   await proxyFetch(url, extraHeaders, req, res);
 }
-
-// ---------- router ----------
 
 const server = http.createServer(async (req, res) => {
   const url = req.url.split("?")[0];
@@ -640,7 +738,6 @@ const server = http.createServer(async (req, res) => {
       });
       return res.end();
     }
-    // web UI: paste a plugin URL → installed live (hot reload picks it up)
     if (url === "/") {
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
       return res.end(homePage());
@@ -650,7 +747,7 @@ const server = http.createServer(async (req, res) => {
     }
     const removeM = /^\/remove-plugin\/([^/]+)$/.exec(url);
     if (removeM && req.method === "DELETE") {
-      return handleRemovePlugin(res, removeM[1]);
+      return handleRemovePlugin(req, res, removeM[1]);
     }
     if (url === "/manifest.json") {
       return sendJson(res, 200, {
@@ -689,7 +786,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 // hot reload: any change under plugins/ or plugins.txt → reload + re-warm.
-// Reloads are serialized; events during boot are ignored (boot loads everything itself).
+// Serialized; events during boot are ignored (boot loads everything itself).
 let booting = true;
 let reloadTimer = null;
 let reloadChain = Promise.resolve();
@@ -711,7 +808,7 @@ fs.watch(PLUGINS_DIR, { recursive: true }, () => reloadNow());
 try {
   fs.watch(PLUGINS_FILE, () => reloadNow());
 } catch (e) {
-  /* plugins.txt optional */
+  // plugins.txt optional
 }
 
 async function boot() {
@@ -725,7 +822,23 @@ async function boot() {
   );
 }
 
-// refresh catalogs periodically so manifest stays current
+// refresh catalogs periodically so the manifest stays current
 setInterval(() => warmAll(true).catch(() => {}), 30 * 60 * 1000).unref();
 
-boot();
+function shutdown() {
+  console.log("shutting down");
+  server.close();
+  for (const p of plugins.values()) p.runtime.destroy();
+  process.exit(0);
+}
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);
+server.on("error", (e) => {
+  console.error("server error:", e);
+  if (e.code === "EADDRINUSE") process.exit(1);
+});
+
+boot().catch((e) => {
+  console.error("boot failed:", e);
+  process.exit(1);
+});

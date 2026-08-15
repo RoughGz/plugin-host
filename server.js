@@ -507,14 +507,26 @@ function homePage(req) {
 // ---------- handlers ----------
 
 async function handleCatalog(req, res, type, catalogId, search) {
-  const found = findCatalog(catalogId);
-  if (!found)
-    return sendJson(res, 404, { error: "unknown catalog: " + catalogId });
-  let items;
+  let found = findCatalog(catalogId);
+  let items = [];
   if (search) {
-    const r = await callPlugin(found.plugin.runtime, "search", [search]);
-    items = r.success && Array.isArray(r.data) ? r.data : [];
+    // Stremio's global search hits /catalog/<type>/top.json?search=... (and any
+    // other unknown id) — route it to every plugin's search and merge
+    const targets = found ? [found.plugin] : [...plugins.values()];
+    const seen = new Set();
+    for (const p of targets) {
+      const r = await callPlugin(p.runtime, "search", [search]);
+      if (!r.success || !Array.isArray(r.data)) continue;
+      for (const item of r.data) {
+        if (!item || !item.url || mapType(item.type) !== type) continue;
+        if (seen.has(item.url)) continue;
+        seen.add(item.url);
+        items.push(item);
+      }
+    }
   } else {
+    if (!found)
+      return sendJson(res, 404, { error: "unknown catalog: " + catalogId });
     if (Date.now() - found.plugin.sectionsTs > CACHE_TTL_MS)
       await warmPlugin(found.plugin);
     items = found.section.items;

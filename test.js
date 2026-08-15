@@ -384,6 +384,31 @@ async function main() {
           Array.isArray(streams.streams) && streams.streams.length > 0,
           JSON.stringify(streams).slice(0, 200),
         );
+        // search route: both the plugin's own catalog (?search=) and the
+        // global Stremio search entry point (top.json?search=) must answer
+        const term = encodeURIComponent(
+          String(item.name || "the").split(" ")[0],
+        );
+        const s1 = await getJson(
+          base +
+            "/catalog/" +
+            (item.type || cat.type) +
+            "/" +
+            cat.id +
+            ".json?search=" +
+            term,
+        );
+        const s2 = await getJson(
+          base +
+            "/catalog/" +
+            (item.type || cat.type) +
+            "/top.json?search=" +
+            term,
+        );
+        check(
+          pluginName + " search",
+          Array.isArray(s1.metas) && Array.isArray(s2.metas),
+        );
       } catch (e) {
         warn(pluginName + " e2e: " + e.message);
       }

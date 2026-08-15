@@ -36,10 +36,13 @@ Any URL form works: `github.com/.../tree/<branch>/<folder>`,
 Only GitHub URLs are installable.
 
 Also available if you prefer clicking: the addon's web page (`/`) has a
-paste-a-URL box with add/remove buttons — handy on a deployed Render app when
-you don't want to push. Web/CLI adds and removals **sync `plugins.txt`**, so
-what you add survives redeploys and what you remove stays removed; `plugins.txt`
-is always the source of truth for what's installed.
+paste-a-URL box with add/remove buttons, a **Copy addon URL** button and an
+**Install in Stremio** button — handy on a deployed Render app when you don't
+want to push. The addon URL gets a fresh `?v=` stamp on every add/remove, so the
+version you share always reflects the current plugin set. Web/CLI adds and
+removals **sync `plugins.txt`**, so what you add survives redeploys and what you
+remove stays removed; `plugins.txt` is always the source of truth for what's
+installed.
 
 Any plugin that exports `getHome` / `search` / `load` / `loadStreams` works:
 getHome sections become catalogs, load feeds meta (with episodes), loadStreams

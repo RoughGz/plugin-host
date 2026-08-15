@@ -32,6 +32,7 @@ try {
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || config.adminToken || null;
 
 const plugins = new Map(); // name -> { name, dir, descriptor, runtime, sections, sectionsTs, metaCache }
+let urlVersion = 1; // bumps on add/remove so the install URL is fresh per change
 
 function publicBase(req) {
   return (
@@ -393,41 +394,107 @@ function esc(s) {
     .replace(/"/g, "&quot;");
 }
 
-function homePage() {
+function homePage(req) {
+  const base = publicBase(req);
+  // ?v= bumps on every add/remove so the install URL is fresh per change
+  const manifestUrl = base + "/manifest.json?v=" + urlVersion;
+  const installHref =
+    "stremio://" +
+    base.replace(/^https?:\/\//, "") +
+    "/manifest.json?v=" +
+    urlVersion;
+  const title = esc(config.name || "Plugin Host");
+  const desc = esc(config.description || "");
   const items = [];
   for (const [name, p] of plugins) {
+    const cats = p.sections.size;
     items.push(
-      "<li><code>" +
+      "<li class='plug'><div class='plug-info'><strong>" +
         esc(name) +
-        "</code> <span style='color:#666'>(" +
+        "</strong><span class='sub'>" +
         esc(p.descriptor.name || "no plugin.json") +
-        ")</span> <button onclick='removePlugin(\"" +
+        (cats ? " · " + cats + " catalog" + (cats > 1 ? "s" : "") : "") +
+        "</span></div><button class='rm' onclick='removePlugin(\"" +
         esc(name) +
         "\")'>remove</button></li>",
     );
   }
-  const title = esc(config.name || "Plugin Host");
   return (
-    "<!doctype html><html><head><meta charset='utf-8'><title>" +
+    "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>" +
+    "<title>" +
     title +
-    "</title></head><body style='font-family:system-ui;max-width:640px;margin:40px auto'>" +
-    "<h2>" +
+    "</title><style>" +
+    "body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;margin:0;background:#0f1117;color:#e6e8ee}" +
+    ".wrap{max-width:720px;margin:0 auto;padding:32px 20px 64px}" +
+    "header{margin-bottom:28px}h1{margin:0 0 6px;font-size:26px}h1 span{color:#7c5cff}" +
+    ".sub{color:#9aa0ae;font-size:14px;line-height:1.5}" +
+    ".card{background:#171a23;border:1px solid #262a36;border-radius:12px;padding:20px;margin-bottom:16px}" +
+    "h2{margin:0 0 12px;font-size:16px;color:#cdd2de}" +
+    ".urlbox{display:flex;gap:8px;margin-bottom:12px}" +
+    ".urlbox input{flex:1;min-width:0;background:#0f1117;border:1px solid #2c3140;color:#9fe6a0;font-family:ui-monospace,monospace;font-size:13px;border-radius:8px;padding:10px}" +
+    "button{cursor:pointer;border:none;border-radius:8px;padding:10px 14px;font-size:13px;font-weight:600}" +
+    ".btn{background:#7c5cff;color:#fff}.btn:hover{background:#8d71ff}" +
+    ".btn-ghost{background:#232838;color:#e6e8ee;border:1px solid #2c3140}.btn-ghost:hover{background:#2b3142}" +
+    ".btns{display:flex;gap:8px;flex-wrap:wrap}" +
+    "a.install{text-decoration:none;display:inline-block;text-align:center}" +
+    "form{display:flex;gap:8px;flex-wrap:wrap}form input[type=text]{flex:1;min-width:200px;background:#0f1117;border:1px solid #2c3140;color:#e6e8ee;border-radius:8px;padding:10px;font-size:13px}" +
+    "form input[type=password]{width:110px;background:#0f1117;border:1px solid #2c3140;color:#e6e8ee;border-radius:8px;padding:10px;font-size:13px}" +
+    "#msg{margin:10px 0 0;font-size:13px;min-height:18px}.ok{color:#7ed47e}.err{color:#ff7b7b}" +
+    "ul{list-style:none;margin:0;padding:0}.plug{display:flex;align-items:center;justify-content:space-between;gap:12px;background:#14161e;border:1px solid #232836;border-radius:8px;padding:12px 14px;margin-bottom:8px}" +
+    ".plug-info{display:flex;flex-direction:column;gap:2px;min-width:0;word-break:break-all}" +
+    ".plug .sub{font-size:12px}" +
+    ".rm{background:#3a1f26;color:#ff9a9a;padding:6px 12px;font-size:12px;border:1px solid #542b34}.rm:hover{background:#4a2630}" +
+    "footer{color:#6b7180;font-size:12px;margin-top:24px;line-height:1.6}" +
+    "code{background:#232838;padding:1px 5px;border-radius:4px;font-size:12px}" +
+    "</style></head><body><div class='wrap'>" +
+    "<header><h1><span>▶</span> " +
     title +
-    " — add a plugin</h2>" +
-    "<p style='color:#666'>Paste a GitHub tree/blob folder URL or a raw plugin.js URL, then press Add. The plugin is installed and live immediately.</p>" +
-    "<form id='f' style='display:flex;gap:8px'>" +
-    "<input id='u' style='flex:1;padding:8px' placeholder='https://github.com/user/repo/tree/main/plugin-folder'>" +
-    "<button style='padding:8px 16px'>Add plugin</button></form>" +
-    "<p id='msg'></p><h3>Installed</h3><ul id='list'>" +
-    (items.length ? items.join("") : "<li style='color:#666'>none yet</li>") +
-    "</ul>" +
-    "<p style='color:#999;font-size:12px'>Stremio: open /manifest.json in Stremio → Addon → Custom URL.</p>" +
-    "<script>" +
-    "const f=document.getElementById('f'),u=document.getElementById('u'),m=document.getElementById('msg');" +
-    "f.onsubmit=async e=>{e.preventDefault();m.textContent='installing...';" +
-    "const r=await fetch('/add-plugin',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:u.value})});" +
-    "const j=await r.json();m.textContent=j.error?'FAILED: '+j.error:'ok — '+j.name+' is live';if(!j.error)setTimeout(()=>location.reload(),800)};" +
-    "async function removePlugin(n){await fetch('/remove-plugin/'+n,{method:'DELETE'});location.reload()}" +
+    "</h1>" +
+    (desc ? "<div class='sub'>" + desc + "</div>" : "") +
+    "</header>" +
+    "<div class='card'><h2>Your addon URL</h2>" +
+    "<div class='urlbox'><input id='url' readonly value='" +
+    manifestUrl +
+    "' onclick='this.select()'></div>" +
+    "<div class='btns'>" +
+    "<button class='btn' onclick='copyUrl()' id='copyBtn'>Copy addon URL</button>" +
+    "<a class='install btn' href='" +
+    installHref +
+    "'>Install in Stremio</a>" +
+    "<button class='btn-ghost' onclick='window.open(\"" +
+    manifestUrl +
+    "\")'>Open manifest</button>" +
+    "</div></div>" +
+    "<div class='card'><h2>Add a plugin</h2>" +
+    "<form id='f'><input type='text' id='u' placeholder='https://github.com/user/repo/tree/main/plugin-folder'>" +
+    "<input type='password' id='t' placeholder='token (optional)' title='Admin token, if ADMIN_TOKEN is set'>" +
+    "<button class='btn' type='submit'>Add plugin</button></form>" +
+    "<p id='msg'></p></div>" +
+    "<div class='card'><h2>Installed plugins (" +
+    plugins.size +
+    ")</h2><ul>" +
+    (items.length
+      ? items.join("")
+      : "<li class='plug'><span class='sub'>none yet — paste a URL above</span></li>") +
+    "</ul></div>" +
+    "<footer>This URL updates whenever you add or remove a plugin — share it and users always see the current catalogs. " +
+    "Plugins are shared by everyone who installs this addon. Set <code>ADMIN_TOKEN</code> to require the token field for add/remove.</footer>" +
+    "</div><script>" +
+    "const url=document.getElementById('url'),f=document.getElementById('f'),u=document.getElementById('u')," +
+    "t=document.getElementById('t'),m=document.getElementById('msg');" +
+    "try{t.value=localStorage.getItem('token')||''}catch(e){}" +
+    "t.oninput=()=>{try{localStorage.setItem('token',t.value)}catch(e){}}" +
+    "const hdr=()=>{const h={'Content-Type':'application/json'};if(t.value.trim())h['x-admin-token']=t.value.trim();return h};" +
+    "async function copyUrl(){const b=document.getElementById('copyBtn');" +
+    "try{await navigator.clipboard.writeText(url.value)}catch(e){url.select();document.execCommand('copy')}" +
+    "b.textContent='copied!';setTimeout(()=>b.textContent='Copy addon URL',1500)}" +
+    "f.onsubmit=async e=>{e.preventDefault();m.className='';m.textContent='installing…';" +
+    "try{const r=await fetch('/add-plugin',{method:'POST',headers:hdr(),body:JSON.stringify({url:u.value})});" +
+    "const j=await r.json();m.className=j.error?'err':'ok';" +
+    "m.textContent=j.error?'FAILED: '+j.error:j.name+' is live — new addon URL generated';" +
+    "if(!j.error)setTimeout(()=>location.reload(),900)}catch(e2){m.className='err';m.textContent='FAILED: '+e2.message}}" +
+    "async function removePlugin(n){const r=await fetch('/remove-plugin/'+n,{method:'DELETE',headers:hdr()});" +
+    "const j=await r.json();if(j.error){m.className='err';m.textContent='FAILED: '+j.error}else location.reload()}" +
     "</script></body></html>"
   );
 }
@@ -476,6 +543,7 @@ async function handleAddPlugin(req, res) {
     // keep plugins.txt in sync so the plugin survives a redeploy; the file
     // watcher (debounced 500ms) reloads and re-warms once
     appendToPluginsTxt(PLUGINS_FILE, url);
+    urlVersion++;
     sendJson(res, 200, { ok: true, name, url });
   } catch (e) {
     sendJson(res, 400, { error: e.message });
@@ -493,6 +561,7 @@ function handleRemovePlugin(req, res, name) {
   fs.rmSync(dir, { recursive: true, force: true });
   // without dropping the plugins.txt line the file-based reload reinstalls it
   dropFromPluginsTxt(PLUGINS_FILE, name);
+  urlVersion++;
   sendJson(res, 200, { ok: true, removed: name });
 }
 
@@ -740,7 +809,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (url === "/") {
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-      return res.end(homePage());
+      return res.end(homePage(req));
     }
     if (url === "/add-plugin" && req.method === "POST") {
       return handleAddPlugin(req, res);

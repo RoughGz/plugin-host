@@ -146,15 +146,23 @@ function transformStreamUrl(url, base) {
   return url;
 }
 
-function mapStream(s, base) {
+function mapStream(s, base, pluginName) {
   const q = typeof s.quality === "number" ? QUALITY_MAP[s.quality] : s.quality;
   const title = [s.source && s.source !== "Auto" ? s.source : "", q]
     .filter(Boolean)
     .join(" ")
     .trim();
-  const out = { url: transformStreamUrl(s.url, base) };
+  const url = transformStreamUrl(s.url, base);
+  const out = { url };
   if (title) out.title = title;
-  out.behaviorHints = { notWebReady: false };
+  // protocol: notWebReady=true unless the URL is a direct https MP4; mkv/m3u8
+  // (direct or proxied) must be handled by the native players, not the web one
+  const isDirectMp4 = /^https:\/\/.+\.mp4($|\?)/i.test(url);
+  out.behaviorHints = { notWebReady: !isDirectMp4 };
+  const group = [pluginName, q || s.source].filter(Boolean).join("-");
+  if (group) out.behaviorHints.bingeGroup = group;
+  const fname = filenameFromUrl(s.url);
+  if (fname) out.behaviorHints.filename = fname; // subtitle addons match on this
   if (Array.isArray(s.subtitles) && s.subtitles.length) {
     out.subtitles = s.subtitles.map((sub) => ({
       lang: sub.lang || sub.label || "en",
@@ -162,6 +170,18 @@ function mapStream(s, base) {
     }));
   }
   return out;
+}
+
+function filenameFromUrl(u) {
+  if (typeof u !== "string" || !/^https?:/.test(u)) return null;
+  try {
+    const name = decodeURIComponent(
+      new URL(u).pathname.split("/").filter(Boolean).pop() || "",
+    );
+    return /^[a-zA-Z0-9][^\\/]{0,199}$/.test(name) ? name : null;
+  } catch (e) {
+    return null;
+  }
 }
 
 const pluginOrder = []; // plugins.txt order = catalog order (file plugins first, web/CLI adds after)
@@ -219,6 +239,7 @@ function loadPlugins() {
       sections: new Map(),
       sectionsTs: 0,
       metaCache: new Map(),
+      streamCache: new Map(),
       runtime: new PluginRuntime(entry.name, code, descriptor, {
         verifyUA: descriptor.verifyUA || null,
       }),
@@ -354,23 +375,27 @@ function findCatalog(catalogId) {
   return null;
 }
 
-async function getRawItem(plugin, metaId) {
-  const cached = plugin.metaCache.get(metaId);
-  if (cached && Date.now() - cached.ts < CACHE_TTL_MS) return cached.item;
-  const res = await callPlugin(plugin.runtime, "load", [metaId]);
-  if (!res.success || !res.data || typeof res.data !== "object") return null;
-  if (plugin.metaCache.size >= META_CACHE_MAX) {
+function cachePut(map, key, ts, value) {
+  if (map.size >= META_CACHE_MAX) {
     let oldestKey = null,
       oldestTs = Infinity;
-    for (const [k, v] of plugin.metaCache) {
+    for (const [k, v] of map) {
       if (v.ts < oldestTs) {
         oldestTs = v.ts;
         oldestKey = k;
       }
     }
-    if (oldestKey) plugin.metaCache.delete(oldestKey);
+    if (oldestKey) map.delete(oldestKey);
   }
-  plugin.metaCache.set(metaId, { ts: Date.now(), item: res.data });
+  map.set(key, { ts, value });
+}
+
+async function getRawItem(plugin, metaId) {
+  const cached = plugin.metaCache.get(metaId);
+  if (cached && Date.now() - cached.ts < CACHE_TTL_MS) return cached.value;
+  const res = await callPlugin(plugin.runtime, "load", [metaId]);
+  if (!res.success || !res.data || typeof res.data !== "object") return null;
+  cachePut(plugin.metaCache, metaId, Date.now(), res.data);
   return res.data;
 }
 
@@ -590,15 +615,7 @@ async function handleMeta(req, res, type, id) {
   sendJson(res, 200, { meta: mapMeta(item) });
 }
 
-async function handleStream(req, res, type, id) {
-  const m = /^(.*):(\d+):(\d+)$/.exec(id);
-  const metaId = m ? m[1] : id;
-  const season = m ? +m[2] : null;
-  const episode = m ? +m[3] : null;
-  const plugin = pluginForId(metaId);
-  if (!plugin) return sendJson(res, 404, { error: "no plugin for id: " + id });
-  const base = publicBase(req);
-
+async function resolveStreams(plugin, metaId, season, episode) {
   let raw = [];
   if (season !== null) {
     const item = await getRawItem(plugin, metaId);
@@ -630,9 +647,31 @@ async function handleStream(req, res, type, id) {
       if (r.success && Array.isArray(r.data)) raw = r.data;
     }
   }
+  return raw;
+}
+
+async function handleStream(req, res, type, id) {
+  const m = /^(.*):(\d+):(\d+)$/.exec(id);
+  const metaId = m ? m[1] : id;
+  const season = m ? +m[2] : null;
+  const episode = m ? +m[3] : null;
+  const plugin = pluginForId(metaId);
+  if (!plugin) return sendJson(res, 404, { error: "no plugin for id: " + id });
+  const base = publicBase(req);
+
+  // cache the resolved stream list (signed URLs last ~1h; 10 min TTL is safe)
+  const cached = plugin.streamCache.get(id);
+  let raw =
+    cached && Date.now() - cached.ts < CACHE_TTL_MS ? cached.value : null;
+  if (!raw) {
+    raw = await resolveStreams(plugin, metaId, season, episode);
+    cachePut(plugin.streamCache, id, Date.now(), raw);
+  }
   if (!raw.length) return sendJson(res, 404, { error: "no streams found" });
   sendJson(res, 200, {
-    streams: raw.filter((s) => s && s.url).map((s) => mapStream(s, base)),
+    streams: raw
+      .filter((s) => s && s.url)
+      .map((s) => mapStream(s, base, plugin.name)),
   });
 }
 
@@ -825,7 +864,8 @@ const server = http.createServer(async (req, res) => {
         name: config.name || "Stremio Addon",
         description: config.description || "",
         logo: config.logo || "",
-        version: "0.1.0",
+        // canonical refresh signal: bump on every plugin add/remove
+        version: "0." + urlVersion + ".0",
         resources: ["catalog", "meta", "stream"],
         types: ["movie", "series"],
         catalogs: catalogList(),

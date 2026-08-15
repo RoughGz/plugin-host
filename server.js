@@ -6,10 +6,15 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { Readable } = require("node:stream");
 const { PluginRuntime, callPlugin } = require("./lib/plugin-host");
-const { installPlugin, normalizePluginUrl } = require("./lib/plugin-url");
+const {
+  installPlugin,
+  normalizePluginUrl,
+  pluginNameFromUrl,
+} = require("./lib/plugin-url");
 
 const ROOT = __dirname;
 const PLUGINS_DIR = path.join(ROOT, "plugins");
+const PLUGINS_FILE = path.join(ROOT, "plugins.txt"); // one plugin URL per line; order = catalog order
 const PORT = process.env.PORT || 3999;
 const CACHE_TTL_MS = 10 * 60 * 1000;
 const DEFAULT_UA =
@@ -157,6 +162,39 @@ function mapStream(s, base) {
 
 // ---------- plugin lifecycle ----------
 
+const pluginOrder = []; // plugin names in plugins.txt order → catalog order (file first, web/CLI adds after)
+
+// Read plugins.txt (one plugin URL per line, # comments allowed) and install
+// any plugin whose folder is not present yet. Never throws — boot must not
+// depend on the network.
+async function installFromUrlsFile() {
+  if (!fs.existsSync(PLUGINS_FILE)) return;
+  let lines;
+  try {
+    lines = fs.readFileSync(PLUGINS_FILE, "utf8").split("\n");
+  } catch (e) {
+    console.warn("plugins.txt unreadable:", e.message);
+    return;
+  }
+  for (const rawLine of lines) {
+    const url = rawLine.trim().replace(/#.*$/, "").trim();
+    if (!url) continue;
+    const name = pluginNameFromUrl(url);
+    if (!name) {
+      console.warn("plugins.txt: skipping unrecognized URL:", url);
+      continue;
+    }
+    if (!pluginOrder.includes(name)) pluginOrder.push(name);
+    if (fs.existsSync(path.join(PLUGINS_DIR, name, "plugin.js"))) continue; // already installed
+    try {
+      await installPlugin(url, PLUGINS_DIR);
+      console.log("installed plugin from plugins.txt:", name);
+    } catch (e) {
+      console.warn("plugins.txt:", name, "failed:", e.message);
+    }
+  }
+}
+
 function loadPlugins() {
   for (const p of plugins.values()) p.runtime.destroy();
   plugins.clear();
@@ -195,6 +233,17 @@ function loadPlugins() {
     );
   }
   if (!found) console.warn("no plugins found in", PLUGINS_DIR);
+  // reorder: plugins listed in plugins.txt keep their file order; anything else
+  // (web/CLI adds) goes after. Keeps catalogs "1st one top, 2nd below".
+  const ordered = [];
+  for (const name of pluginOrder) {
+    const p = plugins.get(name);
+    if (p) ordered.push(p);
+  }
+  for (const [name, p] of plugins)
+    if (!pluginOrder.includes(name)) ordered.push(p);
+  plugins.clear();
+  for (const p of ordered) plugins.set(p.name, p);
   return [...plugins.values()];
 }
 
@@ -639,24 +688,42 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+// hot reload: any change under plugins/ or plugins.txt → reload + re-warm.
+// Reloads are serialized; events during boot are ignored (boot loads everything itself).
+let booting = true;
+let reloadTimer = null;
+let reloadChain = Promise.resolve();
+const reloadNow = () => {
+  if (booting) return;
+  clearTimeout(reloadTimer);
+  reloadTimer = setTimeout(() => {
+    reloadChain = reloadChain
+      .then(async () => {
+        console.log("plugins changed — reloading");
+        await installFromUrlsFile();
+        loadPlugins();
+        await warmAll(true);
+      })
+      .catch((e) => console.warn("reload failed:", e.message));
+  }, 500);
+};
+fs.watch(PLUGINS_DIR, { recursive: true }, () => reloadNow());
+try {
+  fs.watch(PLUGINS_FILE, () => reloadNow());
+} catch (e) {
+  /* plugins.txt optional */
+}
+
 async function boot() {
+  fs.mkdirSync(PLUGINS_DIR, { recursive: true }); // repo may ship without the dir (git ignores empty folders)
+  await installFromUrlsFile();
   loadPlugins();
   await warmAll(true);
+  booting = false;
   server.listen(PORT, () =>
     console.log("addon listening on http://localhost:" + PORT),
   );
 }
-
-// hot reload: any change under plugins/ → reload + re-warm
-let reloadTimer = null;
-fs.watch(PLUGINS_DIR, { recursive: true }, (event, filename) => {
-  clearTimeout(reloadTimer);
-  reloadTimer = setTimeout(async () => {
-    console.log("plugins changed — reloading");
-    loadPlugins();
-    await warmAll(true);
-  }, 500);
-});
 
 // refresh catalogs periodically so manifest stays current
 setInterval(() => warmAll(true).catch(() => {}), 30 * 60 * 1000).unref();

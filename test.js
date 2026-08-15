@@ -187,6 +187,18 @@ async function main() {
     "globalThis.getHome = function(cb){ while(true){} };\n",
   );
 
+  // plugins.txt flow: two real plugins, zinkmovies first → its catalogs must
+  // appear on top. Network-dependent: boot survives, checks degrade to SKIP.
+  const pluginsTxtPath = path.join(__dirname, "plugins.txt");
+  const pluginsTxtBackup = fs.existsSync(pluginsTxtPath)
+    ? fs.readFileSync(pluginsTxtPath, "utf8")
+    : null;
+  fs.writeFileSync(
+    pluginsTxtPath,
+    "https://github.com/likhithkrishna1103-tech/Hindmovie/tree/main/zinkmovies\n" +
+      "https://github.com/likhithkrishna1103-tech/Hindmovie/tree/main/anikage\n",
+  );
+
   console.log("server:");
   const server = spawn("node", ["server.js"], {
     env: { ...process.env, PORT: String(PORT), CALL_TIMEOUT_MS: "15000" },
@@ -203,7 +215,7 @@ async function main() {
         return false;
       }
     },
-    20000,
+    45000,
     "server boot",
   );
   if (!started) {
@@ -226,6 +238,22 @@ async function main() {
       catIds.includes("__test___leaks"),
       "got: " + catIds.join(", "),
     );
+
+    // plugins.txt: catalog order follows file order (zinkmovies first, anikage second)
+    const zkIdx = catIds.findIndex((id) => id.startsWith("zinkmovies_"));
+    const akIdx = catIds.findIndex((id) => id.startsWith("anikage_"));
+    const zkLast = catIds
+      .map((id, i) => (id.startsWith("zinkmovies_") ? i : -1))
+      .reduce((a, b) => Math.max(a, b), -1);
+    if (zkIdx === -1 || akIdx === -1) {
+      warn("plugins.txt install (network): " + catIds.join(", "));
+    } else {
+      check(
+        "catalog order = plugins.txt order",
+        zkLast < akIdx,
+        "zinkmovies ends at " + zkLast + ", anikage starts at " + akIdx,
+      );
+    }
 
     // sandbox isolation: process/require/fs must be invisible
     const cat = await getJson(base + "/catalog/movie/__test___leaks.json");
@@ -361,9 +389,15 @@ async function main() {
       );
     }
 
-    // web UI flow: POST a github tree URL → plugin goes live → DELETE removes it
+    // web UI flow: POST a github tree URL → plugin goes live → DELETE removes it.
+    // Drop zinkmovies from plugins.txt first so the file reload doesn't
+    // re-install it after the web remove (file is the source of truth).
     console.log("web add/remove:");
     try {
+      fs.writeFileSync(
+        pluginsTxtPath,
+        "https://github.com/likhithkrishna1103-tech/Hindmovie/tree/main/anikage\n",
+      );
       const treeUrl =
         "https://github.com/likhithkrishna1103-tech/Hindmovie/tree/main/zinkmovies";
       const addRes = await fetch(base + "/add-plugin", {
@@ -449,6 +483,16 @@ async function main() {
     server.kill();
     fs.rmSync(testDir, { recursive: true, force: true });
     fs.rmSync(hangDir, { recursive: true, force: true });
+    fs.rmSync(path.join(__dirname, "plugins", "zinkmovies"), {
+      recursive: true,
+      force: true,
+    });
+    fs.rmSync(path.join(__dirname, "plugins", "anikage"), {
+      recursive: true,
+      force: true,
+    });
+    if (pluginsTxtBackup === null) fs.rmSync(pluginsTxtPath, { force: true });
+    else fs.writeFileSync(pluginsTxtPath, pluginsTxtBackup);
   }
   await sleep(800);
 

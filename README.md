@@ -11,29 +11,26 @@ automatically respawned.
 
 ## Add a plugin by pasting a URL
 
-**Easiest — paste a link into the addon itself.** Open the addon's web page (`/`
-on your deployed URL), paste any of these into the box, press Add — it's
-installed and live immediately, no code copied anywhere:
+**The main way — a plain text file.** Edit `plugins.txt` in the repo, one URL
+per line. Order matters: the first plugin's catalogs appear on top in Stremio,
+the second below, etc. Save → the running server installs and reloads
+automatically (on Render: edit the file on GitHub and push — auto-deploy does
+the rest):
 
 ```
 https://github.com/likhithkrishna1103-tech/Hindmovie/tree/main/zinkmovies
-https://github.com/user/repo/blob/main/folder/plugin.js
-https://raw.githubusercontent.com/user/repo/main/folder/plugin.js
+https://github.com/likhithkrishna1103-tech/Hindmovie/tree/main/anikage
 ```
 
-Same thing from the CLI (also lets you commit plugins into the repo so they
-survive redeploys):
+Any URL form works: `github.com/.../tree/<branch>/<folder>`,
+`github.com/.../blob/<branch>/<folder>/plugin.js`,
+`raw.githubusercontent.com/.../plugin.js`. Lines starting with `#` are comments.
 
-```bash
-node add-plugin.js https://github.com/likhithkrishna1103-tech/Hindmovie/tree/main/zinkmovies
-node add-plugin.js <url1> <url2> ...
-node add-plugin.js --list
-```
-
-Remove from the web page (Remove button) or
-`curl -X DELETE <base>/remove-plugin/<name>`. On Render the disk is ephemeral:
-plugins added via the web page vanish on the next redeploy — commit them into
-`plugins/` if you want them permanent.
+Also available if you prefer clicking: the addon's web page (`/`) has a
+paste-a-URL box with add/remove buttons — handy on a deployed Render app when
+you don't want to push. Plugins added that way appear after the `plugins.txt`
+ones and vanish on the next redeploy (Render's disk is wiped); plugins from
+`plugins.txt` are installed fresh at every boot.
 
 Any plugin that exports `getHome` / `search` / `load` / `loadStreams` works:
 getHome sections become catalogs, load feeds meta (with episodes), loadStreams

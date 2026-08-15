@@ -149,6 +149,18 @@ function mapStream(s, base, pluginName) {
   // (direct or proxied) must be handled by the native players, not the web one
   const isDirectMp4 = /^https:\/\/.+\.mp4($|\?)/i.test(url);
   out.behaviorHints = { notWebReady: !isDirectMp4 };
+  // plugins may require headers (Referer, cookies, app UA) to serve the file;
+  // Stremio players send no headers, so route those through our proxy
+  const streamHeaders =
+    s.headers && Object.keys(s.headers).length ? s.headers : null;
+  if (streamHeaders) {
+    out.url =
+      base +
+      "/proxy/" +
+      Buffer.from(
+        JSON.stringify({ url: s.url, headers: streamHeaders }),
+      ).toString("base64url");
+  }
   const group = [pluginName, q || s.source].filter(Boolean).join("-");
   if (group) out.behaviorHints.bingeGroup = group;
   const fname = filenameFromUrl(s.url);

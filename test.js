@@ -220,6 +220,10 @@ async function main() {
   );
   if (!started) {
     server.kill();
+    fs.rmSync(testDir, { recursive: true, force: true });
+    fs.rmSync(hangDir, { recursive: true, force: true });
+    if (pluginsTxtBackup === null) fs.rmSync(pluginsTxtPath, { force: true });
+    else fs.writeFileSync(pluginsTxtPath, pluginsTxtBackup);
     console.error("server failed to boot (port " + PORT + " in use?)");
     process.exit(1);
   }

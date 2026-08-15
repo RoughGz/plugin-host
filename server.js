@@ -94,24 +94,28 @@ function mapCast(item) {
 }
 
 function mapMeta(item) {
+  const type = mapType(item.type);
   const episodes = Array.isArray(item.episodes) ? item.episodes : [];
-  const videos = episodes.map((ep, i) => ({
-    id:
-      ep.season != null && ep.episode != null && (ep.season || ep.episode)
-        ? "e" + (ep.season || 0) + "x" + (ep.episode || 0)
-        : "e" + i,
-    title: ep.name || "Episode " + (ep.episode || i + 1),
-    season: ep.season || 1,
-    episode: ep.episode || i + 1,
-    released: ep.airDate,
-    thumbnail: ep.posterUrl,
-    overview: ep.description,
-  }));
-  if (!videos.length && Array.isArray(item.streams) && item.streams.length)
-    videos.push({ id: "direct", title: "Play" });
+  // movies: no videos — Stremio shows one Play button and requests
+  // /stream/movie/<id>. A fake "S1 E1" episode makes movies render as seasons
+  const videos =
+    type === "series"
+      ? episodes.map((ep, i) => ({
+          id:
+            ep.season != null && ep.episode != null && (ep.season || ep.episode)
+              ? "e" + (ep.season || 0) + "x" + (ep.episode || 0)
+              : "e" + i,
+          title: ep.name || "Episode " + (ep.episode || i + 1),
+          season: ep.season || 1,
+          episode: ep.episode || i + 1,
+          released: ep.airDate,
+          thumbnail: ep.posterUrl,
+          overview: ep.description,
+        }))
+      : [];
   return {
     id: item.url,
-    type: mapType(item.type),
+    type,
     name: itemName(item),
     poster: itemPoster(item),
     background: item.bannerUrl || item.backgroundPosterUrl,

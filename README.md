@@ -11,17 +11,16 @@ automatically respawned.
 
 > **Security note (read this).** The `vm` sandbox is _not_ a security boundary
 > on its own — a malicious plugin could escape it and reach the worker thread.
-> Two layers make that impractical here:
 > `--disallow-code-generation-from-strings` is set at runtime (blocks the
 > classic `Buffer.constructor("return process")()` escape, while plugin code and
-> in-sandbox `eval` still work), and installs are **operator-only**
-> (`ADMIN_TOKEN` on the add/remove endpoints). Only install plugins you trust.
+> in-sandbox `eval` still work), and only the operator can install plugins
+> (`plugins.txt`). Only install plugins you trust.
 
-## Add a plugin by pasting a URL
+## Add a plugin (plugins.txt only)
 
-**The main way — a plain text file.** Edit `plugins.txt` in the repo, one URL
-per line. Order matters: the first plugin's catalogs appear on top in Stremio,
-the second below, etc. Save → the running server installs and reloads
+**The one and only way — a plain text file.** Edit `plugins.txt` in the repo,
+one URL per line. Order matters: the first plugin's catalogs appear on top in
+Stremio, the second below, etc. Save → the running server installs and reloads
 automatically (on Render: edit the file on GitHub and push — auto-deploy does
 the rest):
 
@@ -33,31 +32,16 @@ https://github.com/likhithkrishna1103-tech/Hindmovie/tree/main/anikage
 Any URL form works: `github.com/.../tree/<branch>/<folder>`,
 `github.com/.../blob/<branch>/<folder>/plugin.js`,
 `raw.githubusercontent.com/.../plugin.js`. Lines starting with `#` are comments.
-Only GitHub URLs are installable.
+Only GitHub URLs are installable. Removing a line (or pushing a redeploy without
+it) removes that plugin.
 
-Also available if you prefer clicking: the addon's web page (`/`) has a
-paste-a-URL box with add/remove buttons, a **Copy addon URL** button and an
-**Install in Stremio** button — handy on a deployed Render app when you don't
-want to push. The addon URL gets a fresh `?v=` stamp on every add/remove, so the
-version you share always reflects the current plugin set. Web/CLI adds and
-removals **sync `plugins.txt`**, so what you add survives redeploys and what you
-remove stays removed; `plugins.txt` is always the source of truth for what's
-installed.
+The addon's web page (`/`) shows the install URL with **Copy addon URL** and
+**Install in Stremio** buttons. There is no web add/remove — `plugins.txt` is
+the source of truth for what's installed.
 
 Any plugin that exports `getHome` / `search` / `load` / `loadStreams` works:
 getHome sections become catalogs, load feeds meta (with episodes), loadStreams
 feeds streams.
-
-## Protect add/remove
-
-The add/remove endpoints are unauthenticated unless you set a token:
-
-```bash
-export ADMIN_TOKEN=something-long-and-random   # or config.json: "adminToken"
-```
-
-With a token set, web/CLI adds and removes require
-`Authorization: Bearer <token>` (or `x-admin-token`). Render env var works too.
 
 ## Run
 
@@ -95,7 +79,7 @@ entity classes `MultimediaItem`, `Episode`, `StreamResult`, `Actor`, `Trailer`,
 
 ```
 server.js          engine: catalog/meta/stream routing, magic-URL proxy, hot reload
-add-plugin.js      CLI: paste raw plugin.js URL → plugins/<name>/
+add-plugin.js      CLI: paste raw plugin.js URL → plugins/<name>/ (offline only)
 lib/worker.js      sandbox thread (vm context + host globals)
 lib/plugin-host.js worker lifecycle, timeout kill/respawn
 lib/mini-dom.js    dependency-free HTML parser + selector engine

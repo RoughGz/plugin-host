@@ -394,92 +394,52 @@ async function main() {
       );
     }
 
-    // web UI flow: POST a github tree URL → plugin goes live → DELETE removes it.
-    // The server syncs plugins.txt on add/remove (file is the source of truth).
-    console.log("web add/remove:");
+    // plugins.txt is the only way to add/remove plugins: write a GitHub URL,
+    // the file watcher installs it and it goes live (hot reload); dropping
+    // the line removes the plugin dir and drops it from the manifest.
+    console.log("plugins.txt flow:");
     try {
+      fs.rmSync(path.join(__dirname, "plugins", "moviblast"), {
+        recursive: true,
+        force: true,
+      });
       fs.writeFileSync(
         pluginsTxtPath,
-        "https://github.com/likhithkrishna1103-tech/Hindmovie/tree/main/anikage\n",
-      );
-      const treeUrl =
-        "https://github.com/likhithkrishna1103-tech/Hindmovie/tree/main/zinkmovies";
-      const addRes = await fetch(base + "/add-plugin", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: treeUrl }),
-      });
-      const add = await addRes.json();
-      check(
-        "web add plugin (" + treeUrl.slice(0, 50) + "...)",
-        addRes.ok && add.ok && add.name === "zinkmovies",
-        JSON.stringify(add),
+        "https://github.com/likhithkrishna1103-tech/Hindmovie/tree/main/anikage\n" +
+          "https://github.com/RougheHz/SkystreamPlugins/tree/main/moviblast\n",
       );
       const live = await waitFor(
         async () => {
           try {
             const m = await getJson(base + "/manifest.json");
-            return m.catalogs.some((c) => c.id.startsWith("zinkmovies_"));
+            return m.catalogs.some((c) => c.id.startsWith("moviblast_"));
           } catch (e) {
             return false;
           }
         },
         30000,
-        "zinkmovies catalog in manifest",
+        "moviblast catalog in manifest",
       );
-      check("zinkmovies live after web add", live);
-      if (live) {
-        try {
-          const m = await getJson(base + "/manifest.json");
-          const zkCat = m.catalogs.find((c) => c.id.startsWith("zinkmovies_"));
-          const items = await getJson(
-            base + "/catalog/" + zkCat.type + "/" + zkCat.id + ".json",
-          );
-          const item = (items.metas || [])[0];
-          check(
-            "zinkmovies catalog items",
-            !!item && !!item.name,
-            JSON.stringify(item),
-          );
-          if (item) {
-            const streams = await getJson(
-              base +
-                "/stream/" +
-                (item.type || zkCat.type) +
-                "/" +
-                encodeURIComponent(item.id) +
-                ".json",
-            );
-            check(
-              "zinkmovies streams",
-              Array.isArray(streams.streams) && streams.streams.length > 0,
-              JSON.stringify(streams).slice(0, 200),
-            );
-          }
-        } catch (e) {
-          warn("zinkmovies e2e: " + e.message);
-        }
-      }
-      const rmRes = await fetch(base + "/remove-plugin/zinkmovies", {
-        method: "DELETE",
-      });
-      const rm = await rmRes.json();
-      check("web remove plugin", rmRes.ok && rm.ok, JSON.stringify(rm));
+      check("plugin installed from plugins.txt (hot reload)", live);
+      fs.writeFileSync(
+        pluginsTxtPath,
+        "https://github.com/likhithkrishna1103-tech/Hindmovie/tree/main/anikage\n",
+      );
       const gone = await waitFor(
         async () => {
           try {
             const m = await getJson(base + "/manifest.json");
-            return !m.catalogs.some((c) => c.id.startsWith("zinkmovies_"));
+            return !m.catalogs.some((c) => c.id.startsWith("moviblast_"));
           } catch (e) {
             return false;
           }
         },
         15000,
-        "zinkmovies gone from manifest",
+        "moviblast gone from manifest",
       );
-      check("zinkmovies gone after remove", gone);
+      check("plugin removed by dropping its plugins.txt line", gone);
     } catch (e) {
-      warn("web add/remove: " + e.message);
+      warn("plugins.txt flow: " + e.message);
     }
   } finally {
     server.kill();

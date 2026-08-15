@@ -4,13 +4,7 @@ const path = require("node:path");
 const dns = require("node:dns").promises;
 const { Readable } = require("node:stream");
 const { PluginRuntime, callPlugin } = require("./lib/plugin-host");
-const {
-  installPlugin,
-  normalizePluginUrl,
-  pluginNameFromUrl,
-  appendToPluginsTxt,
-  dropFromPluginsTxt,
-} = require("./lib/plugin-url");
+const { installPlugin, pluginNameFromUrl } = require("./lib/plugin-url");
 
 const ROOT = __dirname;
 const PLUGINS_DIR = path.join(ROOT, "plugins");
@@ -19,7 +13,6 @@ fs.mkdirSync(PLUGINS_DIR, { recursive: true }); // git ignores empty dirs; fs.wa
 const PORT = process.env.PORT || 3999;
 const CACHE_TTL_MS = 10 * 60 * 1000;
 const META_CACHE_MAX = 200;
-const MAX_BODY_BYTES = 1024 * 1024;
 const DEFAULT_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36";
 
@@ -30,10 +23,7 @@ try {
   console.error("config.json missing/invalid:", e.message);
 }
 
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || config.adminToken || null;
-
 const plugins = new Map(); // name -> { name, dir, descriptor, runtime, sections, sectionsTs, metaCache }
-let urlVersion = 1; // bumps on add/remove so the install URL is fresh per change
 
 function publicBase(req) {
   return (
@@ -184,9 +174,10 @@ function filenameFromUrl(u) {
   }
 }
 
-const pluginOrder = []; // plugins.txt order = catalog order (file plugins first, web/CLI adds after)
+const pluginOrder = []; // plugins.txt order = catalog order
 
 async function installFromUrlsFile() {
+  pluginOrder.length = 0; // plugins.txt is the single source of truth
   if (!fs.existsSync(PLUGINS_FILE)) return;
   let lines;
   try {
@@ -239,7 +230,6 @@ function loadPlugins() {
       sections: new Map(),
       sectionsTs: 0,
       metaCache: new Map(),
-      streamCache: new Map(),
       runtime: new PluginRuntime(entry.name, code, descriptor, {
         verifyUA: descriptor.verifyUA || null,
       }),
@@ -248,7 +238,6 @@ function loadPlugins() {
     console.log("loaded plugin:", entry.name);
   }
   if (!found) console.warn("no plugins found in", PLUGINS_DIR);
-  // file plugins keep plugins.txt order; web/CLI adds go after (catalog order = file order)
   const ordered = [];
   for (const name of pluginOrder) {
     const p = plugins.get(name);
@@ -422,13 +411,9 @@ function esc(s) {
 
 function homePage(req) {
   const base = publicBase(req);
-  // ?v= bumps on every add/remove so the install URL is fresh per change
-  const manifestUrl = base + "/manifest.json?v=" + urlVersion;
+  const manifestUrl = base + "/manifest.json";
   const installHref =
-    "stremio://" +
-    base.replace(/^https?:\/\//, "") +
-    "/manifest.json?v=" +
-    urlVersion;
+    "stremio://" + base.replace(/^https?:\/\//, "") + "/manifest.json";
   const title = esc(config.name || "Plugin Host");
   const desc = esc(config.description || "");
   const items = [];
@@ -440,9 +425,7 @@ function homePage(req) {
         "</strong><span class='sub'>" +
         esc(p.descriptor.name || "no plugin.json") +
         (cats ? " · " + cats + " catalog" + (cats > 1 ? "s" : "") : "") +
-        "</span></div><button class='rm' onclick='removePlugin(\"" +
-        esc(name) +
-        "\")'>remove</button></li>",
+        "</span></div></li>",
     );
   }
   return (
@@ -463,13 +446,9 @@ function homePage(req) {
     ".btn-ghost{background:#232838;color:#e6e8ee;border:1px solid #2c3140}.btn-ghost:hover{background:#2b3142}" +
     ".btns{display:flex;gap:8px;flex-wrap:wrap}" +
     "a.install{text-decoration:none;display:inline-block;text-align:center}" +
-    "form{display:flex;gap:8px;flex-wrap:wrap}form input[type=text]{flex:1;min-width:200px;background:#0f1117;border:1px solid #2c3140;color:#e6e8ee;border-radius:8px;padding:10px;font-size:13px}" +
-    "form input[type=password]{width:110px;background:#0f1117;border:1px solid #2c3140;color:#e6e8ee;border-radius:8px;padding:10px;font-size:13px}" +
-    "#msg{margin:10px 0 0;font-size:13px;min-height:18px}.ok{color:#7ed47e}.err{color:#ff7b7b}" +
     "ul{list-style:none;margin:0;padding:0}.plug{display:flex;align-items:center;justify-content:space-between;gap:12px;background:#14161e;border:1px solid #232836;border-radius:8px;padding:12px 14px;margin-bottom:8px}" +
     ".plug-info{display:flex;flex-direction:column;gap:2px;min-width:0;word-break:break-all}" +
     ".plug .sub{font-size:12px}" +
-    ".rm{background:#3a1f26;color:#ff9a9a;padding:6px 12px;font-size:12px;border:1px solid #542b34}.rm:hover{background:#4a2630}" +
     "footer{color:#6b7180;font-size:12px;margin-top:24px;line-height:1.6}" +
     "code{background:#232838;padding:1px 5px;border-radius:4px;font-size:12px}" +
     "</style></head><body><div class='wrap'>" +
@@ -491,105 +470,25 @@ function homePage(req) {
     manifestUrl +
     "\")'>Open manifest</button>" +
     "</div></div>" +
-    "<div class='card'><h2>Add a plugin</h2>" +
-    "<form id='f'><input type='text' id='u' placeholder='https://github.com/user/repo/tree/main/plugin-folder'>" +
-    "<input type='password' id='t' placeholder='token (optional)' title='Admin token, if ADMIN_TOKEN is set'>" +
-    "<button class='btn' type='submit'>Add plugin</button></form>" +
-    "<p id='msg'></p></div>" +
     "<div class='card'><h2>Installed plugins (" +
     plugins.size +
     ")</h2><ul>" +
     (items.length
       ? items.join("")
-      : "<li class='plug'><span class='sub'>none yet — paste a URL above</span></li>") +
+      : "<li class='plug'><span class='sub'>none yet — add plugin URLs to <code>plugins.txt</code></span></li>") +
     "</ul></div>" +
-    "<footer>This URL updates whenever you add or remove a plugin — share it and users always see the current catalogs. " +
-    "Plugins are shared by everyone who installs this addon. Set <code>ADMIN_TOKEN</code> to require the token field for add/remove.</footer>" +
+    "<footer>Plugins are configured in <code>plugins.txt</code> (one GitHub plugin URL per line) — edit the file or redeploy to change them. " +
+    "All users of this addon share the same plugins.</footer>" +
     "</div><script>" +
-    "const url=document.getElementById('url'),f=document.getElementById('f'),u=document.getElementById('u')," +
-    "t=document.getElementById('t'),m=document.getElementById('msg');" +
-    "try{t.value=localStorage.getItem('token')||''}catch(e){}" +
-    "t.oninput=()=>{try{localStorage.setItem('token',t.value)}catch(e){}}" +
-    "const hdr=()=>{const h={'Content-Type':'application/json'};if(t.value.trim())h['x-admin-token']=t.value.trim();return h};" +
+    "const url=document.getElementById('url');" +
     "async function copyUrl(){const b=document.getElementById('copyBtn');" +
     "try{await navigator.clipboard.writeText(url.value)}catch(e){url.select();document.execCommand('copy')}" +
     "b.textContent='copied!';setTimeout(()=>b.textContent='Copy addon URL',1500)}" +
-    "f.onsubmit=async e=>{e.preventDefault();m.className='';m.textContent='installing…';" +
-    "try{const r=await fetch('/add-plugin',{method:'POST',headers:hdr(),body:JSON.stringify({url:u.value})});" +
-    "const j=await r.json();m.className=j.error?'err':'ok';" +
-    "m.textContent=j.error?'FAILED: '+j.error:j.name+' is live — new addon URL generated';" +
-    "if(!j.error)setTimeout(()=>location.reload(),900)}catch(e2){m.className='err';m.textContent='FAILED: '+e2.message}}" +
-    "async function removePlugin(n){const r=await fetch('/remove-plugin/'+n,{method:'DELETE',headers:hdr()});" +
-    "const j=await r.json();if(j.error){m.className='err';m.textContent='FAILED: '+j.error}else location.reload()}" +
     "</script></body></html>"
   );
 }
 
-function readBody(req) {
-  return new Promise((resolve, reject) => {
-    let body = "";
-    let done = false;
-    req.on("data", (c) => {
-      if (done) return;
-      body += c;
-      if (Buffer.byteLength(body) > MAX_BODY_BYTES) {
-        done = true;
-        reject(new Error("request body too large"));
-        req.destroy();
-      }
-    });
-    req.on("end", () => {
-      if (!done) resolve(body);
-    });
-    req.on("error", reject);
-  });
-}
-
-function requireAdmin(req) {
-  if (!ADMIN_TOKEN) return true; // no token configured → open (single-tenant/trusted)
-  const auth = req.headers["authorization"] || "";
-  const token = auth.startsWith("Bearer ")
-    ? auth.slice(7)
-    : req.headers["x-admin-token"] || "";
-  return token === ADMIN_TOKEN;
-}
-
-async function handleAddPlugin(req, res) {
-  if (!requireAdmin(req))
-    return sendJson(res, 401, { error: "unauthorized (set ADMIN_TOKEN)" });
-  try {
-    const body = await readBody(req);
-    const raw =
-      (JSON.parse(body).url || "").trim() ||
-      new URLSearchParams(body).get("url") ||
-      "";
-    if (!raw) return sendJson(res, 400, { error: "missing url" });
-    const url = normalizePluginUrl(raw);
-    const { name } = await installPlugin(url, PLUGINS_DIR);
-    // keep plugins.txt in sync so the plugin survives a redeploy; the file
-    // watcher (debounced 500ms) reloads and re-warms once
-    appendToPluginsTxt(PLUGINS_FILE, url);
-    urlVersion++;
-    sendJson(res, 200, { ok: true, name, url });
-  } catch (e) {
-    sendJson(res, 400, { error: e.message });
-  }
-}
-
-function handleRemovePlugin(req, res, name) {
-  if (!requireAdmin(req))
-    return sendJson(res, 401, { error: "unauthorized (set ADMIN_TOKEN)" });
-  if (!/^[a-zA-Z0-9_-]+$/.test(name) || name.startsWith("__"))
-    return sendJson(res, 400, { error: "invalid plugin name" });
-  const dir = path.join(PLUGINS_DIR, name);
-  if (!fs.existsSync(path.join(dir, "plugin.js")))
-    return sendJson(res, 404, { error: "no plugin named " + name });
-  fs.rmSync(dir, { recursive: true, force: true });
-  // without dropping the plugins.txt line the file-based reload reinstalls it
-  dropFromPluginsTxt(PLUGINS_FILE, name);
-  urlVersion++;
-  sendJson(res, 200, { ok: true, removed: name });
-}
+// ---------- handlers ----------
 
 async function handleCatalog(req, res, type, catalogId, search) {
   const found = findCatalog(catalogId);
@@ -659,14 +558,9 @@ async function handleStream(req, res, type, id) {
   if (!plugin) return sendJson(res, 404, { error: "no plugin for id: " + id });
   const base = publicBase(req);
 
-  // cache the resolved stream list (signed URLs last ~1h; 10 min TTL is safe)
-  const cached = plugin.streamCache.get(id);
-  let raw =
-    cached && Date.now() - cached.ts < CACHE_TTL_MS ? cached.value : null;
-  if (!raw) {
-    raw = await resolveStreams(plugin, metaId, season, episode);
-    cachePut(plugin.streamCache, id, Date.now(), raw);
-  }
+  // no stream cache on purpose: plugins hand out short-lived signed URLs
+  // (e.g. moviblast verify= tokens), so mint fresh on every request
+  const raw = await resolveStreams(plugin, metaId, season, episode);
   if (!raw.length) return sendJson(res, 404, { error: "no streams found" });
   sendJson(res, 200, {
     streams: raw
@@ -851,21 +745,13 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
       return res.end(homePage(req));
     }
-    if (url === "/add-plugin" && req.method === "POST") {
-      return handleAddPlugin(req, res);
-    }
-    const removeM = /^\/remove-plugin\/([^/]+)$/.exec(url);
-    if (removeM && req.method === "DELETE") {
-      return handleRemovePlugin(req, res, removeM[1]);
-    }
     if (url === "/manifest.json") {
       return sendJson(res, 200, {
         id: config.id || "com.stremio.addon",
         name: config.name || "Stremio Addon",
         description: config.description || "",
         logo: config.logo || "",
-        // canonical refresh signal: bump on every plugin add/remove
-        version: "0." + urlVersion + ".0",
+        version: "0.1.0",
         resources: ["catalog", "meta", "stream"],
         types: ["movie", "series"],
         catalogs: catalogList(),
@@ -908,6 +794,18 @@ const reloadNow = () => {
       .then(async () => {
         console.log("plugins changed — reloading");
         await installFromUrlsFile();
+        // plugins.txt governs the full set: drop dirs whose plugin is no
+        // longer listed (removing a line = removing the plugin)
+        for (const entry of fs.readdirSync(PLUGINS_DIR, {
+          withFileTypes: true,
+        })) {
+          if (!entry.isDirectory() || pluginOrder.includes(entry.name))
+            continue;
+          fs.rmSync(path.join(PLUGINS_DIR, entry.name), {
+            recursive: true,
+            force: true,
+          });
+        }
         loadPlugins();
         await warmAll(true);
       })

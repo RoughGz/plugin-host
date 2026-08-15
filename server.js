@@ -15,6 +15,7 @@ const {
 const ROOT = __dirname;
 const PLUGINS_DIR = path.join(ROOT, "plugins");
 const PLUGINS_FILE = path.join(ROOT, "plugins.txt"); // one plugin URL per line; order = catalog order
+fs.mkdirSync(PLUGINS_DIR, { recursive: true }); // git ignores empty dirs; fs.watch below needs it to exist
 const PORT = process.env.PORT || 3999;
 const CACHE_TTL_MS = 10 * 60 * 1000;
 const META_CACHE_MAX = 200;
@@ -881,7 +882,6 @@ try {
 }
 
 async function boot() {
-  fs.mkdirSync(PLUGINS_DIR, { recursive: true }); // repo may ship without the dir (git ignores empty folders)
   await installFromUrlsFile();
   loadPlugins();
   await warmAll(true);

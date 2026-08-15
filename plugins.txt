@@ -5,5 +5,6 @@
 #   https://raw.githubusercontent.com/user/repo/main/folder/plugin.js
 # Delete a line (or put # in front) to remove that plugin. Save → live reload.
 
+https://github.com/RougheHz/SkystreamPlugins/tree/main/moviblast
 https://github.com/likhithkrishna1103-tech/Hindmovie/tree/main/zinkmovies
 https://github.com/likhithkrishna1103-tech/Hindmovie/tree/main/anikage

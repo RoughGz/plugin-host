@@ -16,6 +16,19 @@
   const toasts = $("#toasts");
   const installRoot = $("#installRoot");
   const copyManifest = $("#copyManifest");
+  const selBar = $("#selBar");
+  const selCount = $("#selCount");
+  const makeBundle = $("#makeBundle");
+  const bundleResult = $("#bundleResult");
+  const bundleResultUrl = $("#bundleResultUrl");
+  const bundleResultInstall = $("#bundleResultInstall");
+  const bundleResultCopy = $("#bundleResultCopy");
+  const bundleResultCopyBtn = $("#bundleResultCopyBtn");
+  const bundleResultClose = $("#bundleResultClose");
+  const bundlesSection = $("#bundlesSection");
+  const bundleCount = $("#bundleCount");
+  const bundleList = $("#bundleList");
+  const selected = new Set();
 
   function api(path, opts = {}) {
     return fetch(path, opts);
@@ -73,6 +86,9 @@
       0,
     );
     statLive.textContent = plugins.filter((p) => p.status !== "error").length;
+    for (const id of selected)
+      if (!plugins.some((p) => p.id === id)) selected.delete(id);
+    updateSelBar();
 
     for (const p of plugins) {
       const card = document.createElement("article");
@@ -80,6 +96,7 @@
       card.innerHTML = `
         <div class="card-head">
           <div class="card-title">
+            <input type="checkbox" class="card-check" data-check="${esc(p.id)}" title="Select for a bundle" aria-label="Select ${esc(p.name)}" ${selected.has(p.id) ? "checked" : ""}>
             <h3>${esc(p.name)}</h3>
             <span class="status status-${p.status === "error" ? "error" : "live"}">
               ${p.status === "error" ? "Error" : "Live"}
@@ -117,6 +134,90 @@
   }
 
   let lastJson = "";
+  function updateSelBar() {
+    selBar.hidden = selected.size === 0;
+    selCount.textContent =
+      selected.size +
+      (selected.size === 1 ? " plugin selected" : " plugins selected");
+  }
+
+  async function createBundle() {
+    if (!selected.size) return;
+    makeBundle.disabled = true;
+    try {
+      const res = await api("api/bundles", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pluginIds: [...selected] }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "HTTP " + res.status);
+      showBundleResult(data.bundle.url);
+      selected.clear();
+      updateSelBar();
+      for (const cb of grid.querySelectorAll(".card-check")) cb.checked = false;
+      await loadBundles();
+    } catch (e) {
+      toast(e.message, "error");
+    } finally {
+      makeBundle.disabled = false;
+    }
+  }
+
+  function showBundleResult(url) {
+    bundleResultUrl.textContent = url;
+    bundleResultInstall.href = stremioInstallUrl(url);
+    bundleResult.hidden = false;
+    bundleResult.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
+
+  function renderBundles(list) {
+    bundlesSection.hidden = list.length === 0;
+    bundleCount.hidden = list.length === 0;
+    bundleCount.textContent =
+      list.length + (list.length === 1 ? " bundle" : " bundles");
+    bundleList.innerHTML = "";
+    for (const b of list) {
+      const item = document.createElement("div");
+      item.className = "bundle-item";
+      item.innerHTML = `
+        <div class="url-row">
+          <code class="url" title="${esc(b.url)}">${esc(b.url)}</code>
+          <button class="icon-btn" data-bcopy="${esc(b.url)}" title="Copy URL" aria-label="Copy URL">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+          </button>
+        </div>
+        <div class="card-actions">
+          <a class="btn btn-primary btn-sm" href="${esc(stremioInstallUrl(b.url))}">Install in Stremio</a>
+          <button class="btn btn-ghost btn-sm" data-bcopy="${esc(b.url)}">Copy URL</button>
+          <button class="btn btn-ghost btn-sm btn-danger" data-bdel="${esc(b.id)}">Delete</button>
+        </div>`;
+      bundleList.appendChild(item);
+    }
+  }
+
+  async function loadBundles() {
+    const res = await api("api/bundles");
+    if (!res.ok) return;
+    const data = await res.json();
+    renderBundles(data.bundles || []);
+  }
+
+  async function deleteBundle(id) {
+    if (!confirm("Delete this bundle? Its addon URL will stop working."))
+      return;
+    const res = await api("api/bundles/" + encodeURIComponent(id), {
+      method: "DELETE",
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      toast(data.error || "Delete failed", "error");
+      return;
+    }
+    toast("Bundle deleted");
+    await loadBundles();
+  }
+
   async function load() {
     const res = await api("api/plugins");
     if (!res.ok) throw new Error("HTTP " + res.status);
@@ -188,6 +289,35 @@
     }
   });
 
+  grid.addEventListener("change", (e) => {
+    const cb = e.target.closest(".card-check");
+    if (!cb) return;
+    if (cb.checked) selected.add(cb.dataset.check);
+    else selected.delete(cb.dataset.check);
+    updateSelBar();
+  });
+
+  bundleList.addEventListener("click", (e) => {
+    const copyBtn = e.target.closest("[data-bcopy]");
+    if (copyBtn) {
+      copyText(copyBtn.dataset.bcopy).then(() => toast("Link copied"));
+      return;
+    }
+    const delBtn = e.target.closest("[data-bdel]");
+    if (delBtn) deleteBundle(delBtn.dataset.bdel);
+  });
+
+  makeBundle.addEventListener("click", createBundle);
+  bundleResultCopy.addEventListener("click", () =>
+    copyText(bundleResultUrl.textContent).then(() => toast("Link copied")),
+  );
+  bundleResultCopyBtn.addEventListener("click", () =>
+    copyText(bundleResultUrl.textContent).then(() => toast("Link copied")),
+  );
+  bundleResultClose.addEventListener("click", () => {
+    bundleResult.hidden = true;
+  });
+
   installRoot.addEventListener("click", () => {
     window.open(stremioInstallUrl(location.origin + "/manifest.json"), "_self");
   });
@@ -204,4 +334,5 @@
   load().catch((e) => {
     toast("Failed to load plugins: " + e.message, "error");
   });
+  loadBundles().catch(() => {});
 })();

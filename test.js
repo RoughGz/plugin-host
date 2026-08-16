@@ -527,6 +527,34 @@ async function main() {
           "list includes plugin",
           list.plugins.some((p) => p.id === pid),
         );
+        // bundles: unique addon URL for a selection of plugins
+        const bAdd = await fetch(base + "/api/bundles", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pluginIds: [pid] }),
+        });
+        const bData = await bAdd.json();
+        check(
+          "bundle created",
+          bAdd.status === 201 && !!bData.bundle && !!bData.bundle.id,
+          JSON.stringify(bData).slice(0, 200),
+        );
+        let bUrl = null;
+        if (bAdd.status === 201) {
+          bUrl = bData.bundle.url;
+          const bm = await getJson(bUrl);
+          check(
+            "bundle manifest serves only selected plugins",
+            bm.catalogs.length > 0 &&
+              bm.catalogs.every((c) => catIds.includes(c.id)),
+            JSON.stringify(bm.catalogs).slice(0, 200),
+          );
+          const bList = await getJson(base + "/api/bundles");
+          check(
+            "bundle listed",
+            bList.bundles.some((b) => b.id === bData.bundle.id),
+          );
+        }
         // remove via API → gone from the all-plugins manifest
         const del = await fetch(base + "/api/plugins/" + pid, {
           method: "DELETE",
@@ -545,6 +573,15 @@ async function main() {
           "plugin gone from manifest",
         );
         check("plugin gone from manifest", gone);
+        if (bUrl) {
+          // bundle pruned with its plugin → URL dead
+          const bGone = await fetch(bUrl);
+          check("bundle URL dead after plugin removed", bGone.status === 404);
+          const bDel = await fetch(base + "/api/bundles/" + bData.bundle.id, {
+            method: "DELETE",
+          });
+          check("bundle deleted", bDel.status === 200);
+        }
       }
     } catch (e) {
       warn("dashboard API flow: " + e.message);

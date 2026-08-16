@@ -2,6 +2,7 @@ const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
 const dns = require("node:dns").promises;
+const crypto = require("node:crypto");
 const { Readable } = require("node:stream");
 const { PluginRuntime, callPlugin } = require("./lib/plugin-host");
 const { pluginNameFromUrl, fetchPluginSource } = require("./lib/plugin-url");
@@ -10,6 +11,7 @@ const ROOT = __dirname;
 const PLUGINS_DIR = path.join(ROOT, "plugins");
 const DATA_DIR = path.join(ROOT, "data");
 const STATE_FILE = path.join(DATA_DIR, "plugins.json");
+const BUNDLES_FILE = path.join(DATA_DIR, "bundles.json");
 fs.mkdirSync(PLUGINS_DIR, { recursive: true }); // dev/test plugins; git ignores empty dirs
 fs.mkdirSync(DATA_DIR, { recursive: true });
 const PORT = process.env.PORT || 3999;
@@ -203,6 +205,7 @@ function makePlugin(id, name, code, descriptor) {
     error: "",
     runtime: new PluginRuntime(name, code, descriptor, {
       verifyUA: descriptor.verifyUA || null,
+      storageFile: path.join(DATA_DIR, "storage", id + ".json"),
     }),
   };
 }
@@ -669,6 +672,84 @@ function handleListPlugins(req, res) {
   sendJson(res, 200, { plugins: state.map((e) => publicPlugin(e, req)) });
 }
 
+// ---------- bundles: unique addon URLs for a user's plugin selection ----------
+
+let bundles = []; // {id, pluginIds, createdAt}
+
+function loadBundles() {
+  try {
+    bundles = JSON.parse(fs.readFileSync(BUNDLES_FILE, "utf8"));
+    if (!Array.isArray(bundles)) bundles = [];
+  } catch (e) {
+    bundles = [];
+  }
+  pruneBundles();
+}
+
+function saveBundles() {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.writeFileSync(BUNDLES_FILE, JSON.stringify(bundles, null, 2));
+}
+
+// drop bundles whose plugins no longer exist (and dead ids inside survivors)
+function pruneBundles() {
+  for (const b of bundles)
+    b.pluginIds = b.pluginIds.filter((x) => plugins.has(x));
+  bundles = bundles.filter((b) => b.pluginIds.length);
+}
+
+function bundlePool(b) {
+  const pool = { plugins: new Map(), prefixMap: new Map() };
+  for (const id of b.pluginIds) {
+    const p = plugins.get(id);
+    if (p) pool.plugins.set(id, p);
+  }
+  rebuildPrefixMap(pool);
+  return pool;
+}
+
+function publicBundle(b, req) {
+  return {
+    id: b.id,
+    pluginIds: b.pluginIds,
+    url: publicBase(req) + "/bundle/" + b.id + "/manifest.json",
+    createdAt: b.createdAt,
+  };
+}
+
+function handleListBundles(req, res) {
+  sendJson(res, 200, { bundles: bundles.map((b) => publicBundle(b, req)) });
+}
+
+async function handleAddBundle(req, res) {
+  let body;
+  try {
+    body = JSON.parse(await readBody(req, 16384));
+  } catch (e) {
+    return sendJson(res, 400, { error: "bad json body" });
+  }
+  const ids = Array.isArray(body && body.pluginIds)
+    ? body.pluginIds.filter((id) => typeof id === "string" && plugins.has(id))
+    : [];
+  if (!ids.length) return sendJson(res, 400, { error: "no valid plugin ids" });
+  const b = {
+    id: crypto.randomBytes(4).toString("hex"),
+    pluginIds: ids,
+    createdAt: Date.now(),
+  };
+  bundles.push(b);
+  saveBundles();
+  sendJson(res, 201, { bundle: publicBundle(b, req) });
+}
+
+function handleDeleteBundle(req, res, id) {
+  const i = bundles.findIndex((b) => b.id === id);
+  if (i === -1) return sendJson(res, 404, { error: "bundle not found" });
+  bundles.splice(i, 1);
+  saveBundles();
+  sendJson(res, 200, { ok: true });
+}
+
 // POST /api/plugins {url} — fetch + install a plugin, return its addon URL
 async function handleAddPlugin(req, res) {
   let body;
@@ -691,12 +772,9 @@ async function handleAddPlugin(req, res) {
   const plugin = makePlugin(id, source.name, source.code, source.descriptor);
   const pool = poolFor(plugin);
   await warmPlugin(plugin, pool);
-  if (!plugin.sections.size) {
-    plugin.runtime.destroy();
-    return sendJson(res, 400, {
-      error: "plugin has no catalogs (getHome failed?)",
-    });
-  }
+  // non-fatal: flaky upstreams (token-minting getHome, slow mirrors) fail the
+  // first warm — keep the plugin with status "error" and let the manifest
+  // self-heal retry it. Rejecting the add made such plugins uninstallable.
   writePluginFiles(plugin, source.code, source.descriptor);
   state.push({ id, name: source.name, url, addedAt: Date.now() });
   saveState();
@@ -716,6 +794,8 @@ function handleDeletePlugin(req, res, id) {
   fs.rmSync(path.join(PLUGINS_DIR, id), { recursive: true, force: true });
   state.splice(idx, 1);
   saveState();
+  pruneBundles();
+  saveBundles();
   rebuildPrefixMap(globalPool);
   console.log("removed plugin:", id);
   sendJson(res, 200, { ok: true });
@@ -723,7 +803,7 @@ function handleDeletePlugin(req, res, id) {
 
 // ---------- addon handlers ----------
 
-function manifest(pool, req) {
+function manifest(pool, req, idOverride) {
   // self-heal: stale empty catalogs kick a background warm (Render idle spin-down)
   for (const p of pool.plugins.values()) {
     if (!p.sections.size && Date.now() - p.sectionsTs > CACHE_TTL_MS) {
@@ -732,7 +812,7 @@ function manifest(pool, req) {
     }
   }
   return {
-    id: config.id || "com.stremio.addon",
+    id: idOverride || config.id || "com.stremio.addon",
     name: config.name || "Stremio Addon",
     description: config.description || "",
     logo: config.logo || "",
@@ -1044,12 +1124,66 @@ const server = http.createServer(async (req, res) => {
     const delM = /^\/api\/plugins\/([A-Za-z0-9_-]+)$/.exec(url);
     if (delM && req.method === "DELETE")
       return handleDeletePlugin(req, res, delM[1]);
+    if (url === "/api/bundles" && req.method === "GET")
+      return handleListBundles(req, res);
+    if (url === "/api/bundles" && req.method === "POST")
+      return handleAddBundle(req, res);
+    const delBM = /^\/api\/bundles\/([a-f0-9]{8})$/.exec(url);
+    if (delBM && req.method === "DELETE")
+      return handleDeleteBundle(req, res, delBM[1]);
 
     // ---- dashboard ----
     if (url === "/" || url === "/index.html") {
       return serveStatic(req, res, "/");
     }
     if (serveStatic(req, res, url)) return;
+
+    // ---- bundles: unique addon URLs for a user's plugin selection ----
+    const bundleM = /^\/bundle\/([a-f0-9]{8})\/(.+)$/.exec(url);
+    if (bundleM) {
+      const b = bundles.find((x) => x.id === bundleM[1]);
+      if (!b) return sendJson(res, 404, { error: "bundle not found" });
+      const pool = bundlePool(b);
+      const rest = "/" + bundleM[2];
+      if (rest === "/manifest.json")
+        return sendJson(
+          res,
+          200,
+          manifest(pool, req, config.id + "-bundle-" + b.id),
+        );
+      const proxyM = /^\/proxy\/(.+)$/.exec(rest);
+      if (proxyM) return handleProxy(req, res, proxyM[1]);
+      const catM = /^\/catalog\/(movie|series)\/([^/]+)\.json$/.exec(rest);
+      if (catM)
+        return handleCatalog(
+          req,
+          res,
+          catM[1],
+          decodeURIComponent(catM[2]),
+          query.get("search"),
+          pool,
+        );
+      const metaM = /^\/meta\/(movie|series)\/([^/]+)\.json$/.exec(rest);
+      if (metaM)
+        return handleMeta(
+          req,
+          res,
+          metaM[1],
+          decodeURIComponent(metaM[2]),
+          pool,
+        );
+      const streamM = /^\/stream\/(movie|series)\/([^/]+)\.json$/.exec(rest);
+      if (streamM)
+        return handleStream(
+          req,
+          res,
+          streamM[1],
+          decodeURIComponent(streamM[2]),
+          pool,
+          publicBase(req),
+        );
+      return sendJson(res, 404, { error: "not found" });
+    }
 
     // ---- per-plugin addon URLs: /<id>/<route> ----
     const pluginM = /^\/([A-Za-z0-9_-]{1,64})\/(.+)$/.exec(url);
@@ -1163,6 +1297,7 @@ if (process.env.NODE_ENV !== "production")
 async function boot() {
   await loadState();
   await loadFromState();
+  loadBundles();
   booting = false;
   server.listen(PORT, () => {
     console.log("addon listening on http://localhost:" + PORT);

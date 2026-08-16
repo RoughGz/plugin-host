@@ -106,6 +106,71 @@
           <div class="stat"><span id="statCatalogs">0</span> catalogs</div>
           <div class="stat stat-live"><span id="statLive">0</span> live</div>
         </div>
+        <div class="sel-bar" id="selBar" hidden>
+          <span id="selCount"></span>
+          <button id="makeBundle" class="btn btn-primary btn-sm">
+            Generate bundle URL
+          </button>
+        </div>
+        <div id="bundleResult" class="bundle-result" hidden>
+          <div class="bundle-result-head">
+            <strong>Your unique addon URL</strong>
+            <button
+              class="icon-btn"
+              id="bundleResultClose"
+              title="Dismiss"
+              aria-label="Dismiss"
+            >
+              <svg
+                viewBox="0 0 24 24"
+                width="15"
+                height="15"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <path d="M18 6L6 18M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+          <p>
+            This URL serves exactly the plugins you selected — adding or
+            removing plugins later won't change it. Share it with anyone.
+          </p>
+          <div class="url-row">
+            <code class="url" id="bundleResultUrl"></code>
+            <button
+              class="icon-btn"
+              id="bundleResultCopy"
+              title="Copy URL"
+              aria-label="Copy URL"
+            >
+              <svg
+                viewBox="0 0 24 24"
+                width="15"
+                height="15"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <rect x="9" y="9" width="13" height="13" rx="2" />
+                <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" />
+              </svg>
+            </button>
+          </div>
+          <div class="card-actions">
+            <a class="btn btn-primary btn-sm" id="bundleResultInstall" href="#">
+              Install in Stremio
+            </a>
+            <button class="btn btn-ghost btn-sm" id="bundleResultCopyBtn">
+              Copy URL
+            </button>
+          </div>
+        </div>
         <div id="grid" class="grid"></div>
         <div id="empty" class="empty" hidden>
           <svg
@@ -127,6 +192,14 @@
             you can install in Stremio.
           </p>
         </div>
+      </section>
+
+      <section class="bundles-section" id="bundlesSection" hidden>
+        <div class="section-head">
+          <h2>Your bundles</h2>
+          <span class="badge" id="bundleCount" hidden></span>
+        </div>
+        <div id="bundleList" class="bundle-list"></div>
       </section>
     </main>
 

@@ -43,8 +43,8 @@
           <h2>Add a plugin or repository</h2>
           <p>
             Paste a plugin URL (GitHub folder, plugin.js, or .sky bundle) to
-            install it — or a repo.json URL to browse and pick from a whole
-            repository.
+            install it — or a repo.json URL to load its plugins below, tick the
+            ones you want, and generate a bundle URL.
           </p>
         </div>
         <form id="addForm" class="add-form">
@@ -62,18 +62,7 @@
           </button>
         </form>
         <div id="addError" class="alert alert-error" hidden></div>
-        <div id="repoResult" hidden>
-          <div class="repo-head">
-            <strong id="repoName"></strong>
-            <span id="repoDesc" class="muted"></span>
-          </div>
-          <div id="repoPlugins" class="repo-plugins"></div>
-          <div class="add-actions">
-            <button id="repoAddSelected" class="btn btn-primary" disabled>
-              Add selected
-            </button>
-          </div>
-        </div>
+        <div id="repoInfo" class="repo-info" hidden></div>
       </section>
 
       <section class="plugins-section">

@@ -492,7 +492,7 @@ async function main() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          url: "https://github.com/RougheHz/SkystreamPlugins/tree/main/moviblast",
+          url: "https://github.com/likhithkrishna1103-tech/Hindmovie/tree/main/movies4u",
         }),
       });
       const added = await addRes.json();
@@ -517,7 +517,7 @@ async function main() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            url: "https://github.com/RougheHz/SkystreamPlugins/tree/main/moviblast",
+            url: "https://github.com/likhithkrishna1103-tech/Hindmovie/tree/main/movies4u",
           }),
         });
         check("duplicate add rejected", dup.status === 409);

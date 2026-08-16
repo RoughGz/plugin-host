@@ -33,8 +33,7 @@ input,
 label,
 a,
 .chip,
-.card-check,
-.repo-check {
+.card-check {
   touch-action: manipulation;
 }
 
@@ -270,60 +269,32 @@ body {
   color: #fca5a5;
 }
 
-/* ---------- repo browser ---------- */
-.repo-head {
+/* ---------- repo plugins in the grid ---------- */
+.repo-info {
   margin-top: 14px;
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  flex-wrap: wrap;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: rgba(99, 102, 241, 0.1);
+  border: 1px solid rgba(99, 102, 241, 0.3);
+  color: #c7d2fe;
+  font-size: 13.5px;
 }
-.repo-head .muted {
-  color: #94a3b8;
+.card-repo {
+  border-style: dashed;
+  border-color: #3b4a6b;
+}
+.card-repo .card-desc {
+  color: var(--text-dim);
   font-size: 13px;
 }
-.repo-plugins {
-  margin-top: 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  max-height: 320px;
-  overflow-y: auto;
+.card-repo .repo-hint {
+  color: #5a6275;
+  font-size: 12px;
+  margin-top: auto;
 }
-.repo-plugin {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 10px 12px;
-  border: 1px solid rgba(148, 163, 184, 0.2);
-  border-radius: 10px;
-  background: rgba(148, 163, 184, 0.06);
-}
-.repo-plugin input {
-  margin-top: 3px;
-  accent-color: #6366f1;
-}
-.repo-plugin .rp-name {
-  font-weight: 600;
-  font-size: 14px;
-}
-.repo-plugin .rp-desc {
-  color: #94a3b8;
-  font-size: 12.5px;
-  margin-top: 2px;
-}
-.repo-plugin .rp-cats {
-  display: flex;
-  gap: 6px;
-  margin-top: 6px;
-  flex-wrap: wrap;
-}
-.repo-plugin .rp-cats span {
-  font-size: 11px;
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: rgba(99, 102, 241, 0.15);
+.status-repo {
   color: #a5b4fc;
+  background: rgba(99, 102, 241, 0.15);
 }
 
 /* ---------- plugins section ---------- */
@@ -433,8 +404,8 @@ body {
 }
 
 .card-check {
-  width: 18px;
-  height: 18px;
+  width: 34px;
+  height: 34px;
   accent-color: var(--accent);
   cursor: pointer;
   flex-shrink: 0;
@@ -672,16 +643,9 @@ body {
     width: 100%;
   }
 
-  .repo-plugin {
-    padding: 12px;
-  }
-  .repo-plugin input {
-    width: 20px;
-    height: 20px;
-    margin-top: 1px;
-  }
-
   .url {
+
+.url {
     font-size: 12px;
   }
 

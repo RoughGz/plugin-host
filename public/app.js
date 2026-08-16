@@ -84,8 +84,15 @@
       0,
     );
     statLive.textContent = plugins.filter((p) => p.status !== "error").length;
-    for (const id of selected)
-      if (!plugins.some((p) => p.id === id)) selected.delete(id);
+    for (const id of selected) {
+      if (id.startsWith("repo:")) {
+        // keep repo selections only while the repo plugin is still listed
+        if (!repoPluginList.some((p) => "repo:" + p.url === id))
+          selected.delete(id);
+      } else if (!plugins.some((p) => p.id === id)) {
+        selected.delete(id);
+      }
+    }
     updateSelBar();
 
     for (const p of plugins) {
@@ -129,6 +136,34 @@
         </div>`;
       grid.appendChild(card);
     }
+
+    // repo plugins (not installed yet) render as cards too — tick them and
+    // "Generate bundle URL" installs them first, then bundles everything
+    for (const rp of repoPluginList) {
+      if (plugins.some((p) => p.url === rp.url)) continue; // already installed
+      const card = document.createElement("article");
+      card.className = "card card-repo";
+      card.innerHTML = `
+        <div class="card-head">
+          <div class="card-title">
+            <input type="checkbox" class="card-check" data-repo="${esc(rp.url)}" title="Select for a bundle" aria-label="Select ${esc(rp.name)}" ${selected.has("repo:" + rp.url) ? "checked" : ""}>
+            <h3>${esc(rp.name)}</h3>
+            <span class="status status-repo">Available</span>
+          </div>
+        </div>
+        ${rp.description ? `<p class="card-desc">${esc(rp.description)}</p>` : ""}
+        <div class="chips">
+          ${
+            rp.categories.length
+              ? rp.categories
+                  .map((c) => `<span class="chip">${esc(c)}</span>`)
+                  .join("")
+              : '<span class="chip chip-muted">from repository</span>'
+          }
+        </div>
+        <p class="repo-hint">Tick it and press "Generate bundle URL" to install + bundle.</p>`;
+      grid.appendChild(card);
+    }
   }
 
   let lastJson = "";
@@ -143,17 +178,50 @@
     if (!selected.size) return;
     makeBundle.disabled = true;
     try {
+      // repo-selected plugins aren't installed yet — install them first so
+      // the bundle has real plugin ids. One failure doesn't block the rest.
+      const repoUrls = [...selected]
+        .filter((k) => k.startsWith("repo:"))
+        .map((k) => k.slice(5));
+      const names = new Map(repoPluginList.map((p) => [p.url, p.name]));
+      const ids = [...selected].filter((k) => !k.startsWith("repo:"));
+      const failed = [];
+      for (const url of repoUrls) {
+        try {
+          const res = await api("api/plugins", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ url, name: names.get(url) || "" }),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(data.error || "HTTP " + res.status);
+          ids.push(data.plugin.id);
+        } catch (e) {
+          failed.push((names.get(url) || url) + ": " + e.message);
+        }
+      }
+      if (!ids.length) {
+        toast(
+          "Nothing to bundle" +
+            (failed.length ? " — " + failed.join(" | ") : ""),
+          "error",
+        );
+        return;
+      }
       const res = await api("api/bundles", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pluginIds: [...selected] }),
+        body: JSON.stringify({ pluginIds: ids }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || "HTTP " + res.status);
       showBundleResult(data.bundle.url);
+      if (failed.length)
+        toast("Some plugins failed: " + failed.join(" | "), "error");
       selected.clear();
       updateSelBar();
       for (const cb of grid.querySelectorAll(".card-check")) cb.checked = false;
+      await load();
       await loadBundles();
     } catch (e) {
       toast(e.message, "error");
@@ -276,21 +344,15 @@
     else addPlugin(url);
   });
 
-  // ---- repository browser (inline in the add card) ----
-  const repoError = $("#addError");
-  const repoResult = $("#repoResult");
-  const repoName = $("#repoName");
-  const repoDesc = $("#repoDesc");
-  const repoPlugins = $("#repoPlugins");
-  const repoAddSelected = $("#repoAddSelected");
+  // ---- repository: repo.json plugins render into the main grid ----
+  const repoInfo = $("#repoInfo");
   let repoPluginList = [];
 
   async function loadRepo(url) {
     addBtn.disabled = true;
     addBtn.querySelector(".btn-label").hidden = true;
     addBtn.querySelector(".spinner").hidden = false;
-    repoError.hidden = true;
-    repoResult.hidden = true;
+    addError.hidden = true;
     try {
       const res = await api("api/repos", {
         method: "POST",
@@ -300,77 +362,28 @@
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || "HTTP " + res.status);
       repoPluginList = data.plugins || [];
-      repoName.textContent = data.name;
-      repoDesc.textContent = data.description || "";
-      repoPlugins.innerHTML = "";
-      for (const p of repoPluginList) {
-        const row = document.createElement("label");
-        row.className = "repo-plugin";
-        row.innerHTML =
-          '<input type="checkbox" class="repo-check" data-repo="' +
-          p.url.replace(/"/g, "&quot;") +
-          '">' +
-          '<div><div class="rp-name">' +
-          esc(p.name) +
-          "</div>" +
-          (p.description
-            ? '<div class="rp-desc">' + esc(p.description) + "</div>"
-            : "") +
-          (p.categories.length
-            ? '<div class="rp-cats">' +
-              p.categories.map((c) => "<span>" + esc(c) + "</span>").join("") +
-              "</div>"
-            : "") +
-          "</div>";
-        repoPlugins.appendChild(row);
-      }
-      repoResult.hidden = false;
-      updateRepoAddBtn();
+      urlInput.value = "";
+      repoInfo.textContent =
+        "Repository \u201c" +
+        (data.name || "?") +
+        "\u201d loaded \u2014 " +
+        repoPluginList.length +
+        " plugins below. Tick the ones you want, then press \u201cGenerate bundle URL\u201d.";
+      repoInfo.hidden = false;
+      toast("Repo loaded: " + repoPluginList.length + " plugins");
+      // load() skips re-render when the plugin list didn't change — force it
+      // so the repo's cards show up in the grid
+      lastJson = "";
+      await load();
     } catch (e) {
-      repoError.textContent = e.message;
-      repoError.hidden = false;
+      addError.textContent = e.message;
+      addError.hidden = false;
     } finally {
       addBtn.disabled = false;
       addBtn.querySelector(".btn-label").hidden = false;
       addBtn.querySelector(".spinner").hidden = true;
     }
   }
-
-  function updateRepoAddBtn() {
-    const any = repoPlugins.querySelector(".repo-check:checked");
-    repoAddSelected.disabled = !any;
-  }
-
-  repoPlugins.addEventListener("change", updateRepoAddBtn);
-
-  repoAddSelected.addEventListener("click", async () => {
-    const urls = [...repoPlugins.querySelectorAll(".repo-check:checked")].map(
-      (cb) => cb.dataset.repo,
-    );
-    if (!urls.length) return;
-    repoAddSelected.disabled = true;
-    const names = new Map(repoPluginList.map((p) => [p.url, p.name]));
-    let ok = 0;
-    const errors = [];
-    for (const url of urls) {
-      try {
-        const res = await api("api/plugins", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ url, name: names.get(url) || "" }),
-        });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data.error || "HTTP " + res.status);
-        ok++;
-      } catch (e) {
-        errors.push(names.get(url) || url + ": " + e.message);
-      }
-    }
-    if (ok) toast("Added " + ok + " plugin" + (ok > 1 ? "s" : ""));
-    if (errors.length) toast("Failed: " + errors.join(" | "), "error");
-    repoAddSelected.disabled = false;
-    await load();
-  });
 
   grid.addEventListener("click", (e) => {
     const copyBtn = e.target.closest("[data-copy]");
@@ -389,8 +402,9 @@
   grid.addEventListener("change", (e) => {
     const cb = e.target.closest(".card-check");
     if (!cb) return;
-    if (cb.checked) selected.add(cb.dataset.check);
-    else selected.delete(cb.dataset.check);
+    const key = cb.dataset.repo ? "repo:" + cb.dataset.repo : cb.dataset.check;
+    if (cb.checked) selected.add(key);
+    else selected.delete(key);
     updateSelBar();
   });
 

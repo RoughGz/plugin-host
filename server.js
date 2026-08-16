@@ -420,7 +420,9 @@ async function loadFromState() {
   globalPool.prefixMap.clear();
   for (const entry of state) {
     try {
-      const { name, code, descriptor } = await fetchPluginSource(entry.url);
+      const { name, code, descriptor } = entry.url.endsWith(".sky")
+        ? await fetchPluginSourceFromSky(entry.url, entry.name || "")
+        : await fetchPluginSource(entry.url);
       const plugin = makePlugin(entry.id, name, code, descriptor);
       writePluginFiles(plugin, code, descriptor);
       plugins.set(entry.id, plugin);
@@ -506,8 +508,12 @@ async function warmPlugin(plugin, pool) {
     const built = new Map();
     for (const [name, items] of Object.entries(sectionMap)) {
       if (!Array.isArray(items) || !items.length) continue;
-      const firstType = mapType(items[0].type);
-      built.set(slugify(name), { name, type: firstType, items });
+      // plugins sometimes sprinkle null/undefined into their lists; a null
+      // entry used to crash warmPlugin -> killed the whole server on add
+      const clean = items.filter((i) => i && typeof i === "object");
+      if (!clean.length) continue;
+      const firstType = mapType(clean[0].type);
+      built.set(slugify(name), { name, type: firstType, items: clean });
     }
     if (!built.size) {
       // no sections (flaky/blocked upstream) — keep existing catalogs, stale beats empty
@@ -799,10 +805,16 @@ async function handleAddPlugin(req, res) {
   const id = uniqueId(slugify(source.name));
   const plugin = makePlugin(id, source.name, source.code, source.descriptor);
   const pool = poolFor(plugin);
-  await warmPlugin(plugin, pool);
-  // non-fatal: flaky upstreams (token-minting getHome, slow mirrors) fail the
-  // first warm — keep the plugin with status "error" and let the manifest
-  // self-heal retry it. Rejecting the add made such plugins uninstallable.
+  // non-fatal: a warm failure (flaky upstream, bad getHome payload) must not
+  // take down the add request — or worse, the whole server. Keep the plugin
+  // with status "error" and let the manifest self-heal retry it.
+  await warmPlugin(plugin, pool).catch((e) => {
+    plugin.status = "error";
+    plugin.error = e.message;
+    console.warn("warm", plugin.name, "failed:", e.message);
+  });
+  // non-fatal warm failures don't block persistence — the plugin stays
+  // installed and the manifest self-heal retries it
   writePluginFiles(plugin, source.code, source.descriptor);
   state.push({ id, name: source.name, url, addedAt: Date.now() });
   saveState();
@@ -1384,6 +1396,13 @@ function shutdown() {
 }
 process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);
+// router does `return handler(req, res)` — a rejection there bypasses the
+// try/catch and would crash the whole server (unhandled rejection). Log it
+// and keep serving; the request already got its 500 via the handler's own
+// error paths where possible.
+process.on("unhandledRejection", (e) => {
+  console.error("unhandled rejection:", e && e.stack ? e.stack : e);
+});
 server.on("error", (e) => {
   console.error("server error:", e);
   if (e.code === "EADDRINUSE") process.exit(1);

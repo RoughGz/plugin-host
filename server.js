@@ -456,6 +456,7 @@ function writePluginFiles(plugin, code, descriptor) {
       path.join(plugin.dir, "plugin.json"),
       JSON.stringify(descriptor, null, 2),
     );
+  lastSelfWrite = Date.now(); // management-API writes manage state directly — no hot reload
 }
 
 async function warmPlugin(plugin, pool) {
@@ -1146,6 +1147,9 @@ const server = http.createServer(async (req, res) => {
 // hot reload: any change under plugins/ → reload + re-warm (dev/test only).
 // Serialized; events during boot are ignored (boot loads everything itself).
 // Writes made by the management API are skipped (they manage state directly).
+// Disabled in production: on Render the only writes come from the management
+// API, and a reload re-warms every plugin — a flaky upstream then wipes the
+// catalogs the add flow just built.
 let booting = true;
 let lastSelfWrite = 0;
 let reloadTimer = null;
@@ -1163,7 +1167,8 @@ const reloadNow = () => {
       .catch((e) => console.warn("reload failed:", e.message));
   }, 500);
 };
-fs.watch(PLUGINS_DIR, { recursive: true }, () => reloadNow());
+if (process.env.NODE_ENV !== "production")
+  fs.watch(PLUGINS_DIR, { recursive: true }, () => reloadNow());
 
 async function boot() {
   loadState();

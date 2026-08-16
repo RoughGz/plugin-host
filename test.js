@@ -170,6 +170,17 @@ async function main() {
   const hangDir = path.join(__dirname, "plugins", "__hang__");
   fs.rmSync(testDir, { recursive: true, force: true });
   fs.rmSync(hangDir, { recursive: true, force: true });
+  // leftover plugin dirs from local runs (e.g. plugins/moviblast) would be
+  // hot-loaded as dev plugins and shadow the test's catalog checks
+  for (const entry of fs.readdirSync(path.join(__dirname, "plugins"), {
+    withFileTypes: true,
+  })) {
+    if (entry.isDirectory() && !entry.name.startsWith("__"))
+      fs.rmSync(path.join(__dirname, "plugins", entry.name), {
+        recursive: true,
+        force: true,
+      });
+  }
   fs.mkdirSync(testDir, { recursive: true });
   fs.mkdirSync(hangDir, { recursive: true });
   fs.writeFileSync(

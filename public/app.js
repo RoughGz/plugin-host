@@ -98,6 +98,7 @@
     for (const p of plugins) {
       const card = document.createElement("article");
       card.className = "card" + (p.status === "error" ? " card-error" : "");
+      if (selected.has(p.id)) card.classList.add("card-selected");
       card.innerHTML = `
         <div class="card-head">
           <div class="card-title">
@@ -107,8 +108,9 @@
               ${p.status === "error" ? "Error" : "Live"}
             </span>
           </div>
-          <button class="icon-btn" data-remove="${esc(p.id)}" title="Remove plugin" aria-label="Remove ${esc(p.name)}">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/></svg>
+          <button class="btn-remove" data-remove="${esc(p.id)}" title="Remove plugin" aria-label="Remove ${esc(p.name)}">
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/></svg>
+            Remove
           </button>
         </div>
         ${p.status === "error" ? `<p class="card-error-msg">${esc(p.error)}</p>` : ""}
@@ -143,6 +145,7 @@
       if (plugins.some((p) => p.url === rp.url)) continue; // already installed
       const card = document.createElement("article");
       card.className = "card card-repo";
+      if (selected.has("repo:" + rp.url)) card.classList.add("card-selected");
       card.innerHTML = `
         <div class="card-head">
           <div class="card-title">
@@ -220,7 +223,10 @@
         toast("Some plugins failed: " + failed.join(" | "), "error");
       selected.clear();
       updateSelBar();
-      for (const cb of grid.querySelectorAll(".card-check")) cb.checked = false;
+      for (const cb of grid.querySelectorAll(".card-check")) {
+        cb.checked = false;
+        cb.closest(".card").classList.remove("card-selected");
+      }
       await load();
       await loadBundles();
     } catch (e) {
@@ -396,6 +402,14 @@
       const card = rmBtn.closest(".card");
       const name = card.querySelector("h3").textContent;
       removePlugin(rmBtn.dataset.remove, name);
+      return;
+    }
+    // clicking anywhere else on a card toggles its checkbox
+    const card = e.target.closest(".card");
+    if (card && !e.target.closest("button, a, input")) {
+      const cb = card.querySelector(".card-check");
+      cb.checked = !cb.checked;
+      cb.dispatchEvent(new Event("change", { bubbles: true }));
     }
   });
 
@@ -405,6 +419,7 @@
     const key = cb.dataset.repo ? "repo:" + cb.dataset.repo : cb.dataset.check;
     if (cb.checked) selected.add(key);
     else selected.delete(key);
+    cb.closest(".card").classList.toggle("card-selected", cb.checked);
     updateSelBar();
   });
 

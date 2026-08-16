@@ -254,10 +254,10 @@ const TYPE_MAP = {
   show: "series",
   anime: "series",
   animes: "series",
-  livestream: "series",
-  livetv: "series",
-  iptv: "series",
-  live: "series",
+  livestream: "movie",
+  livetv: "movie",
+  iptv: "movie",
+  live: "movie",
   other: "movie",
 };
 function mapType(t) {
@@ -315,24 +315,33 @@ function epNumbers(ep, i) {
 }
 
 function mapMeta(item) {
-  const type = mapType(item.type);
+  let type = mapType(item.type);
   const episodes = Array.isArray(item.episodes) ? item.episodes : [];
+  // SkyStream parity: a series with exactly one episode is treated as a movie
+  // (single-episode VOD), and livestreams are movies too
+  if (type === "series" && episodes.length === 1) type = "movie";
   // build videos whenever the plugin provides episodes — SkyStream encodes
   // movies as a single "Play Movie" episode (season 1, episode 1), and series
   // plugins may label their type "tv"/"show"/"anime"/... or leave it unset
   // (defaults to "movie"), so type alone must not gate episode rendering
-  const videos = episodes.map((ep, i) => {
-    const n = epNumbers(ep, i);
-    return {
-      id: "e" + n.season + "x" + n.episode,
-      title: ep.name || "Episode " + n.episode,
-      season: n.season,
-      episode: n.episode,
-      released: ep.airDate,
-      thumbnail: ep.posterUrl,
-      overview: ep.description,
-    };
-  });
+  const videos = episodes
+    .map((ep, i) => {
+      const n = epNumbers(ep, i);
+      // Stremio builds the stream request from the video's id, so it must
+      // embed the meta id (item.url): /stream/<type>/<metaId>:<s>:<e>.json.
+      // A synthetic id like "e1x1" makes Stremio request /stream/.../e1x1.json
+      // which no plugin owns -> "no streams" even though the plugin works.
+      return {
+        id: item.url + ":" + n.season + ":" + n.episode,
+        title: ep.name || "Episode " + n.episode,
+        season: n.season,
+        episode: n.episode,
+        released: ep.airDate,
+        thumbnail: ep.posterUrl,
+        overview: ep.description,
+      };
+    })
+    .sort((a, b) => a.season - b.season || a.episode - b.episode);
   return {
     id: item.url,
     type,
@@ -585,6 +594,71 @@ function pluginForId(id, pool) {
   return null;
 }
 
+// Some plugins use non-URL item ids (castle://media/..., JSON blobs like
+// {"mode":"tmdb",...}) that no prefix can route. Probe: fire load(id) at all
+// plugins in parallel, first one that returns a valid item wins. Result is
+// cached per id (positive + short negative) so repeat requests are instant.
+const probeCache = new Map(); // id -> { pluginId, ts } | { miss: true, ts }
+const PROBE_TIMEOUT_MS = 15000;
+const PROBE_NEGATIVE_TTL_MS = 60000;
+
+async function probePluginForId(id, pool) {
+  const cached = probeCache.get(id);
+  if (cached) {
+    if (cached.pluginId) {
+      const p = pool.plugins.get(cached.pluginId);
+      if (p) return p;
+    } else if (Date.now() - cached.ts < PROBE_NEGATIVE_TTL_MS) {
+      return null;
+    }
+  }
+  // deterministic first: the owning plugin's catalog contains this exact item
+  for (const p of pool.plugins.values()) {
+    for (const section of p.sections.values()) {
+      if (section.items.some((it) => it && it.url === id)) {
+        probeCache.set(id, { pluginId: p.id, ts: Date.now() });
+        return p;
+      }
+    }
+  }
+  const candidates = [...pool.plugins.values()].filter((p) => p.runtime);
+  if (!candidates.length) return null;
+  // fallback: fire load(id) at all plugins; prefer the one whose result
+  // actually matches the id (url backfilled to id, or has episodes/streams)
+  const probeAll = (async () => {
+    const results = await Promise.allSettled(
+      candidates.map(async (p) => {
+        const res = await callPlugin(p.runtime, "load", [id]);
+        if (!res.success || !res.data || typeof res.data !== "object")
+          return null;
+        return { p, d: res.data };
+      }),
+    );
+    const hits = results
+      .filter((r) => r.status === "fulfilled" && r.value)
+      .map((r) => r.value);
+    if (!hits.length) return null;
+    const score = (h) =>
+      (h.d.url === id ? 4 : 0) +
+      (Array.isArray(h.d.episodes) && h.d.episodes.length ? 2 : 0) +
+      (Array.isArray(h.d.streams) && h.d.streams.length ? 2 : 0) +
+      (h.d.name && h.d.name !== "No Title" && h.d.name !== "Untitled" ? 1 : 0);
+    hits.sort((a, b) => score(b) - score(a));
+    return hits[0].p;
+  })();
+  const winner = await Promise.race([
+    probeAll,
+    new Promise((res) => setTimeout(() => res(null), PROBE_TIMEOUT_MS)),
+  ]);
+  probeCache.set(
+    id,
+    winner
+      ? { pluginId: winner.id, ts: Date.now() }
+      : { miss: true, ts: Date.now() },
+  );
+  return winner;
+}
+
 function catalogList(pool) {
   const multi = pool.plugins.size > 1;
   const out = [];
@@ -596,6 +670,12 @@ function catalogList(pool) {
         id: prefix + "_" + slug,
         type: section.type,
         name: multi ? label + " • " + section.name : section.name,
+        // board-compatible: without `extra` Stremio's home board shows
+        // "No home rows available ... without required extras"
+        extra: [
+          { name: "skip", options: ["0", "1", "2", "3"] },
+          { name: "genre", options: [] },
+        ],
       });
     }
   }
@@ -644,6 +724,9 @@ async function getRawItem(plugin, metaId) {
   if (cached && Date.now() - cached.ts < CACHE_TTL_MS) return cached.value;
   const res = await callPlugin(plugin.runtime, "load", [metaId]);
   if (!res.success || !res.data || typeof res.data !== "object") return null;
+  // SkyStream parity: plugins may omit `url` in load() results — backfill it
+  // with the requested URL (movie playback depends on this)
+  if (!res.data.url) res.data.url = metaId;
   cachePut(plugin.metaCache, metaId, Date.now(), res.data);
   return res.data;
 }
@@ -926,7 +1009,8 @@ async function handleCatalog(req, res, type, catalogId, search, pool) {
 }
 
 async function handleMeta(req, res, type, id, pool) {
-  const plugin = pluginForId(id, pool);
+  let plugin = pluginForId(id, pool);
+  if (!plugin) plugin = await probePluginForId(id, pool);
   if (!plugin) return sendJson(res, 404, { error: "no plugin for id: " + id });
   const item = await getRawItem(plugin, id);
   if (!item) return sendJson(res, 404, { error: "meta not found" });
@@ -976,7 +1060,8 @@ async function handleStream(req, res, type, id, pool, base) {
   const metaId = m ? m[1] : id;
   const season = m ? +m[2] : null;
   const episode = m ? +m[3] : null;
-  const plugin = pluginForId(metaId, pool);
+  let plugin = pluginForId(metaId, pool);
+  if (!plugin) plugin = await probePluginForId(metaId, pool);
   if (!plugin) return sendJson(res, 404, { error: "no plugin for id: " + id });
 
   // no stream cache on purpose: plugins hand out short-lived signed URLs

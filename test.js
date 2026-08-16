@@ -182,6 +182,17 @@ async function main() {
     path.join(hangDir, "plugin.js"),
     "globalThis.getHome = function(cb){ while(true){} };\n",
   );
+  // warm-failure stub: first getHome returns a section, later ones return
+  // success-with-empty (what blocked/flaky upstreams do) — catalogs must
+  // survive the re-warm
+  const warmDir = path.join(__dirname, "plugins", "__warmfail__");
+  fs.rmSync(warmDir, { recursive: true, force: true });
+  fs.mkdirSync(warmDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(warmDir, "plugin.js"),
+    "var n = 0;\n" +
+      'globalThis.getHome = function(cb){ n++; if (n === 1) cb({success:true, data:{Keep:[{url:"https://warmfail.test/keep", title:"Keep Me"}]}}); else cb({success:true, data:{}}); };\n',
+  );
 
   // seed plugins: two real plugins, zinkmovies first → its catalogs must
   // appear on top. Written as the legacy plugins.txt so boot exercises the
@@ -200,7 +211,12 @@ async function main() {
 
   console.log("server:");
   const server = spawn("node", ["server.js"], {
-    env: { ...process.env, PORT: String(PORT), CALL_TIMEOUT_MS: "15000" },
+    env: {
+      ...process.env,
+      PORT: String(PORT),
+      CALL_TIMEOUT_MS: "15000",
+      CACHE_TTL_MS: "1500", // fast TTL so the warm-failure re-warm test runs quickly
+    },
   });
   server.stdout.on("data", (d) => process.stdout.write("[server] " + d));
   server.stderr.on("data", (d) => process.stderr.write("[server] " + d));
@@ -241,6 +257,23 @@ async function main() {
       "temp plugin hot-loaded",
       catIds.includes("__test___leaks"),
       "got: " + catIds.join(", "),
+    );
+
+    // warm-failure resilience: a re-warm that returns no sections must NOT
+    // wipe existing catalogs (blocked/flaky upstreams return success+empty)
+    const warmCatId = "__warmfail___keep";
+    check(
+      "warmfail stub has catalog at boot",
+      catIds.includes(warmCatId),
+      "got: " + catIds.join(", "),
+    );
+    await sleep(2000); // let CACHE_TTL_MS (1.5s) expire
+    await getJson(base + "/catalog/movie/" + warmCatId + ".json"); // triggers re-warm → getHome returns {}
+    const manifest2 = await getJson(base + "/manifest.json");
+    check(
+      "catalogs survive empty re-warm",
+      manifest2.catalogs.some((c) => c.id === warmCatId),
+      "got: " + manifest2.catalogs.map((c) => c.id).join(", "),
     );
 
     // plugins.txt migration: catalog order follows file order (zinkmovies first, anikage second)

@@ -13,7 +13,7 @@ const STATE_FILE = path.join(DATA_DIR, "plugins.json");
 fs.mkdirSync(PLUGINS_DIR, { recursive: true }); // dev/test plugins; git ignores empty dirs
 fs.mkdirSync(DATA_DIR, { recursive: true });
 const PORT = process.env.PORT || 3999;
-const CACHE_TTL_MS = 10 * 60 * 1000;
+const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS) || 10 * 60 * 1000;
 const META_CACHE_MAX = 200;
 const DEFAULT_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36";
@@ -477,16 +477,27 @@ async function warmPlugin(plugin, pool) {
       );
       return; // keep existing sections — stale catalogs beat empty ones
     }
-    plugin.sections.clear();
-    plugin.metaCache.clear();
     const sectionMap = Array.isArray(res.data)
       ? { [plugin.descriptor.name || plugin.name]: res.data }
       : res.data;
+    const built = new Map();
     for (const [name, items] of Object.entries(sectionMap)) {
       if (!Array.isArray(items) || !items.length) continue;
       const firstType = mapType(items[0].type);
-      plugin.sections.set(slugify(name), { name, type: firstType, items });
+      built.set(slugify(name), { name, type: firstType, items });
     }
+    if (!built.size) {
+      // upstream returned no sections (blocked/flaky API, or a JSON error
+      // page that parses) — keep existing catalogs, stale beats empty
+      plugin.sectionsTs = Date.now();
+      plugin.status = "error";
+      plugin.error = "getHome returned no sections";
+      console.warn("plugin", plugin.name, "getHome returned no sections");
+      return;
+    }
+    plugin.sections.clear();
+    plugin.metaCache.clear();
+    for (const [slug, section] of built) plugin.sections.set(slug, section);
     plugin.sectionsTs = Date.now();
     plugin.status = "ok";
     plugin.error = "";

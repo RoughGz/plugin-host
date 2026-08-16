@@ -2,6 +2,7 @@ const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
 const dns = require("node:dns").promises;
+const crypto = require("node:crypto");
 const { Readable } = require("node:stream");
 const { PluginRuntime, callPlugin } = require("./lib/plugin-host");
 const { pluginNameFromUrl, fetchPluginSource } = require("./lib/plugin-url");
@@ -624,7 +625,7 @@ function sendJson(res, status, obj) {
     "Content-Type": "application/json; charset=utf-8",
     "Content-Length": Buffer.byteLength(body),
     "Cache-Control": "no-store",
-    "Access-Control-Allow-Origin": "*",
+    "X-Content-Type-Options": "nosniff",
   });
   res.end(body);
 }
@@ -838,6 +839,7 @@ async function handleStream(req, res, type, id, pool, base) {
 // ---------- magic-URL proxy ----------
 
 function isPrivateIp(ip) {
+  if (/^::ffff:/i.test(ip)) return true; // IPv4-mapped IPv6 (::ffff:127.0.0.1 etc.)
   if (ip === "0.0.0.0" || ip === "::" || ip === "::1") return true;
   if (/^127\./.test(ip) || /^10\./.test(ip) || /^192\.168\./.test(ip))
     return true;
@@ -1023,33 +1025,56 @@ function serveStatic(req, res, url) {
 
 const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
+// Management API + dashboard live on an unguessable capability path so
+// strangers can't add/remove plugins (adding a plugin runs its code).
+// The addon routes (/manifest.json, /<id>/...) stay on the public root.
+const MGMT = "/mgmt-" + crypto.randomBytes(16).toString("hex");
+
 const server = http.createServer(async (req, res) => {
   const url = req.url.split("?")[0];
   const query = new URLSearchParams(req.url.split("?")[1] || "");
   try {
     if (req.method === "OPTIONS") {
       res.writeHead(204, {
-        "Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Methods": "GET,POST,DELETE,OPTIONS",
         "Access-Control-Allow-Headers": "*",
       });
       return res.end();
     }
 
-    // ---- management API ----
-    if (url.startsWith("/api/")) {
-      if (url === "/api/plugins" && req.method === "GET")
+    // ---- management API (capability path only) ----
+    if (url.startsWith(MGMT + "/api/")) {
+      const apiUrl = url.slice(MGMT.length);
+      if (apiUrl === "/api/plugins" && req.method === "GET")
         return handleListPlugins(req, res);
-      if (url === "/api/plugins" && req.method === "POST")
+      if (apiUrl === "/api/plugins" && req.method === "POST")
         return handleAddPlugin(req, res);
-      const delM = /^\/api\/plugins\/([A-Za-z0-9_-]+)$/.exec(url);
+      const delM = /^\/api\/plugins\/([A-Za-z0-9_-]+)$/.exec(apiUrl);
       if (delM && req.method === "DELETE")
         return handleDeletePlugin(req, res, delM[1]);
       return sendJson(res, 404, { error: "not found" });
     }
 
-    // ---- dashboard ----
-    if (serveStatic(req, res, url)) return;
+    // ---- dashboard (capability path only) ----
+    if (url === MGMT || url === MGMT + "/") {
+      return serveStatic(req, res, "/");
+    }
+    if (url.startsWith(MGMT + "/")) {
+      if (serveStatic(req, res, url.slice(MGMT.length))) return;
+      return sendJson(res, 404, { error: "not found" });
+    }
+
+    // ---- public root: addon routes only ----
+    if (url === "/") {
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      return res.end(
+        "<!doctype html><meta charset=utf-8><title>" +
+          (config.name || "Plugin Host") +
+          "</title><h1>" +
+          (config.name || "Plugin Host") +
+          '</h1><p>Addon is live. Install <a href="/manifest.json">/manifest.json</a> in Stremio.</p>',
+      );
+    }
 
     // ---- per-plugin addon URLs: /<id>/<route> ----
     const pluginM = /^\/([A-Za-z0-9_-]{1,64})\/(.+)$/.exec(url);
@@ -1165,9 +1190,10 @@ async function boot() {
   await loadFromState();
   await warmAll();
   booting = false;
-  server.listen(PORT, () =>
-    console.log("addon listening on http://localhost:" + PORT),
-  );
+  server.listen(PORT, () => {
+    console.log("addon listening on http://localhost:" + PORT);
+    console.log("management dashboard: http://localhost:" + PORT + MGMT + "/");
+  });
 }
 
 // refresh catalogs periodically so the manifest stays current

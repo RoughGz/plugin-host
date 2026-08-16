@@ -221,15 +221,23 @@ async function main() {
   );
 
   console.log("server:");
-  const server = spawn("node", ["server.js"], {
-    env: {
-      ...process.env,
-      PORT: String(PORT),
-      CALL_TIMEOUT_MS: "15000",
-      CACHE_TTL_MS: "1500", // fast TTL so the warm-failure re-warm test runs quickly
+  const server = spawn(
+    "node",
+    ["--disallow-code-generation-from-strings", "server.js"],
+    {
+      env: {
+        ...process.env,
+        PORT: String(PORT),
+        CALL_TIMEOUT_MS: "15000",
+        CACHE_TTL_MS: "1500", // fast TTL so the warm-failure re-warm test runs quickly
+      },
     },
+  );
+  let serverOut = "";
+  server.stdout.on("data", (d) => {
+    serverOut += d;
+    process.stdout.write("[server] " + d);
   });
-  server.stdout.on("data", (d) => process.stdout.write("[server] " + d));
   server.stderr.on("data", (d) => process.stderr.write("[server] " + d));
   const base = "http://localhost:" + PORT;
   const started = await waitFor(
@@ -244,14 +252,22 @@ async function main() {
     45000,
     "server boot",
   );
-  if (!started) {
+  // management dashboard lives on an unguessable /mgmt-<random>/ path
+  const mgmt = (serverOut.match(
+    /management dashboard: http:\/\/localhost:\d+(\/mgmt-[a-f0-9]+)\//,
+  ) || [])[1];
+  if (!started || !mgmt) {
     server.kill();
     fs.rmSync(testDir, { recursive: true, force: true });
     fs.rmSync(hangDir, { recursive: true, force: true });
     fs.rmSync(path.join(__dirname, "plugins.txt"), { force: true });
     if (stateBackup === null) fs.rmSync(statePath, { force: true });
     else fs.writeFileSync(statePath, stateBackup);
-    console.error("server failed to boot (port " + PORT + " in use?)");
+    console.error(
+      "server failed to boot (port " +
+        PORT +
+        " in use?) or mgmt path not logged",
+    );
     process.exit(1);
   }
 
@@ -471,7 +487,7 @@ async function main() {
     // the plugin goes live with its own unique addon URL; DELETE removes it.
     console.log("dashboard API flow:");
     try {
-      const addRes = await fetch(base + "/api/plugins", {
+      const addRes = await fetch(base + mgmt + "/api/plugins", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -496,7 +512,7 @@ async function main() {
           JSON.stringify(m.catalogs).slice(0, 200),
         );
         // duplicate add → 409
-        const dup = await fetch(base + "/api/plugins", {
+        const dup = await fetch(base + mgmt + "/api/plugins", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -505,13 +521,13 @@ async function main() {
         });
         check("duplicate add rejected", dup.status === 409);
         // list includes it
-        const list = await getJson(base + "/api/plugins");
+        const list = await getJson(base + mgmt + "/api/plugins");
         check(
           "list includes plugin",
           list.plugins.some((p) => p.id === pid),
         );
         // remove via API → gone from the all-plugins manifest
-        const del = await fetch(base + "/api/plugins/" + pid, {
+        const del = await fetch(base + mgmt + "/api/plugins/" + pid, {
           method: "DELETE",
         });
         check("plugin removed via API", del.status === 200);

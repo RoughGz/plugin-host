@@ -17,9 +17,15 @@ automatically respawned.
 
 ## Manage plugins from the dashboard (no config files)
 
-The web page (`/`) is the plugin manager. Paste a GitHub plugin URL → the plugin
-is fetched, validated, and goes live instantly with **its own unique addon
-URL**:
+The management dashboard lives on an **unguessable URL** — the server logs it at
+boot:
+
+```
+management dashboard: http://your-host.onrender.com/mgmt-<random-hex>/
+```
+
+Paste a GitHub plugin URL → the plugin is fetched, validated, and goes live
+instantly with **its own unique addon URL**:
 
 ```
 https://your-host.onrender.com/<plugin-id>/manifest.json
@@ -53,6 +59,10 @@ feeds streams.
 npm start            # listens on $PORT or 3999
 npm test             # sandbox isolation + hang-kill + E2E for installed plugins
 ```
+
+`npm start` runs `node --disallow-code-generation-from-strings server.js` — the
+flag closes the vm sandbox's string-codegen escape (the runtime fallback in
+`lib/plugin-host.js` also sets it, but the process flag is authoritative).
 
 `config.json` — addon identity. Set `publicUrl` (or the `PUBLIC_URL` env var) to
 your deployed URL so magic proxy URLs (`MAGIC_PROXY_*`, `magic_m3u8:`) are

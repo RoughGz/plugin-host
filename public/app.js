@@ -110,7 +110,7 @@
   }
 
   async function load() {
-    const res = await api("/api/plugins");
+    const res = await api("api/plugins");
     if (!res.ok) throw new Error("HTTP " + res.status);
     const data = await res.json();
     render(data.plugins || []);
@@ -122,7 +122,7 @@
     addBtn.querySelector(".spinner").hidden = false;
     addError.hidden = true;
     try {
-      const res = await api("/api/plugins", {
+      const res = await api("api/plugins", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url }),
@@ -145,7 +145,7 @@
   async function removePlugin(id, name) {
     if (!confirm('Remove "' + name + '"? Its addon URL will stop working.'))
       return;
-    const res = await api("/api/plugins/" + encodeURIComponent(id), {
+    const res = await api("api/plugins/" + encodeURIComponent(id), {
       method: "DELETE",
     });
     if (!res.ok) {

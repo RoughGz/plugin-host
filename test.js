@@ -272,19 +272,28 @@ async function main() {
   }
 
   try {
-    // hot reload should pick up the temp plugins
+    // hot reload should pick up the temp plugins (warm runs in the
+    // background now, so poll until the stub's catalog appears)
+    const booted = await waitFor(
+      async () => {
+        try {
+          const m = await getJson(base + "/manifest.json");
+          return m.catalogs.some((c) => c.id === "__test___leaks");
+        } catch (e) {
+          return false;
+        }
+      },
+      45000,
+      "catalogs after boot",
+    );
     const manifest = await getJson(base + "/manifest.json");
     const catIds = manifest.catalogs.map((c) => c.id);
     check(
       "manifest catalogs listed",
-      catIds.length > 0,
+      booted && catIds.length > 0,
       "got: " + catIds.join(", "),
     );
-    check(
-      "temp plugin hot-loaded",
-      catIds.includes("__test___leaks"),
-      "got: " + catIds.join(", "),
-    );
+    check("temp plugin hot-loaded", booted, "got: " + catIds.join(", "));
 
     // warm-failure resilience: a re-warm that returns no sections must NOT
     // wipe existing catalogs (blocked/flaky upstreams return success+empty)

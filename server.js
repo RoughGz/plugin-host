@@ -1188,12 +1188,14 @@ if (process.env.NODE_ENV !== "production")
 async function boot() {
   await loadState();
   await loadFromState();
-  await warmAll();
   booting = false;
   server.listen(PORT, () => {
     console.log("addon listening on http://localhost:" + PORT);
     console.log("management dashboard: http://localhost:" + PORT + MGMT + "/");
   });
+  // warm in the background — slow plugins (token-minting getHome can take
+  // ~60s) must not delay boot past Render's deploy timeout
+  warmAll().catch((e) => console.warn("boot warm failed:", e.message));
 }
 
 // refresh catalogs periodically so the manifest stays current

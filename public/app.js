@@ -5,13 +5,15 @@
   const $ = (sel) => document.querySelector(sel);
   const grid = $("#grid");
   const empty = $("#empty");
-  const count = $("#count");
+  const stats = $("#stats");
+  const statPlugins = $("#statPlugins");
+  const statCatalogs = $("#statCatalogs");
+  const statLive = $("#statLive");
   const addForm = $("#addForm");
   const urlInput = $("#urlInput");
   const addBtn = $("#addBtn");
   const addError = $("#addError");
   const toasts = $("#toasts");
-  const installAll = $("#installAll");
   const installRoot = $("#installRoot");
   const copyManifest = $("#copyManifest");
 
@@ -64,10 +66,13 @@
   function render(plugins) {
     grid.innerHTML = "";
     empty.hidden = plugins.length > 0;
-    count.hidden = plugins.length === 0;
-    count.textContent =
-      plugins.length + (plugins.length === 1 ? " plugin" : " plugins");
-    installAll.hidden = plugins.length === 0;
+    stats.hidden = plugins.length === 0;
+    statPlugins.textContent = plugins.length;
+    statCatalogs.textContent = plugins.reduce(
+      (n, p) => n + p.catalogs.length,
+      0,
+    );
+    statLive.textContent = plugins.filter((p) => p.status !== "error").length;
 
     for (const p of plugins) {
       const card = document.createElement("article");
@@ -111,10 +116,14 @@
     }
   }
 
+  let lastJson = "";
   async function load() {
     const res = await api("api/plugins");
     if (!res.ok) throw new Error("HTTP " + res.status);
     const data = await res.json();
+    const json = JSON.stringify(data.plugins || []);
+    if (json === lastJson) return; // skip re-render (and card re-animation)
+    lastJson = json;
     render(data.plugins || []);
   }
 
@@ -179,10 +188,6 @@
     }
   });
 
-  installAll.addEventListener("click", () => {
-    window.open(stremioInstallUrl(location.origin + "/manifest.json"), "_self");
-  });
-
   installRoot.addEventListener("click", () => {
     window.open(stremioInstallUrl(location.origin + "/manifest.json"), "_self");
   });
@@ -192,6 +197,9 @@
       toast("Manifest URL copied"),
     );
   });
+
+  // keep statuses fresh (a plugin can recover or error at any time)
+  setInterval(() => load().catch(() => {}), 30000);
 
   load().catch((e) => {
     toast("Failed to load plugins: " + e.message, "error");

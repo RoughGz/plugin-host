@@ -35,29 +35,6 @@
           <p>Stremio addon manager</p>
         </div>
       </div>
-      <div class="topbar-actions">
-        <button
-          id="installAll"
-          class="btn btn-ghost"
-          hidden
-          title="Install all plugins as one addon"
-        >
-          <svg
-            viewBox="0 0 24 24"
-            width="16"
-            height="16"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          >
-            <path d="M12 3v12m0 0l-4-4m4 4l4-4" />
-            <path d="M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" />
-          </svg>
-          Install all
-        </button>
-      </div>
     </header>
 
     <main class="container">
@@ -85,10 +62,36 @@
         </form>
         <div id="addError" class="alert alert-error" hidden></div>
         <div class="add-actions">
-          <button id="installRoot" class="btn btn-primary btn-sm">
-            Install
+          <button id="installRoot" class="btn btn-primary">
+            <svg
+              viewBox="0 0 24 24"
+              width="16"
+              height="16"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <path d="M12 3v12m0 0l-4-4m4 4l4-4" />
+              <path d="M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" />
+            </svg>
+            Install all
           </button>
-          <button id="copyManifest" class="btn btn-ghost btn-sm">
+          <button id="copyManifest" class="btn btn-ghost">
+            <svg
+              viewBox="0 0 24 24"
+              width="16"
+              height="16"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <rect x="9" y="9" width="13" height="13" rx="2" />
+              <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" />
+            </svg>
             Copy manifest URL
           </button>
         </div>
@@ -97,7 +100,11 @@
       <section class="plugins-section">
         <div class="section-head">
           <h2>Your plugins</h2>
-          <span id="count" class="badge" hidden></span>
+        </div>
+        <div class="stats" id="stats" hidden>
+          <div class="stat"><span id="statPlugins">0</span> plugins</div>
+          <div class="stat"><span id="statCatalogs">0</span> catalogs</div>
+          <div class="stat stat-live"><span id="statLive">0</span> live</div>
         </div>
         <div id="grid" class="grid"></div>
         <div id="empty" class="empty" hidden>

@@ -1453,8 +1453,15 @@ const reloadNow = () => {
       .catch((e) => console.warn("reload failed:", e.message));
   }, 500);
 };
-if (process.env.NODE_ENV !== "production")
-  fs.watch(PLUGINS_DIR, { recursive: true }, () => reloadNow());
+if (process.env.NODE_ENV !== "production") {
+  const watcher = fs.watch(PLUGINS_DIR, { recursive: true }, () => reloadNow());
+  // a plugin dir removed mid-watch makes the recursive watcher throw ENOENT
+  // and crash the whole server — ignore it, reloadNow() handles the change
+  watcher.on("error", (e) => {
+    if (e && e.code === "ENOENT") return;
+    console.warn("plugin dir watcher error:", e && e.message);
+  });
+}
 
 async function boot() {
   await loadState();

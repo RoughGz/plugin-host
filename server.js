@@ -833,8 +833,23 @@ async function handleCatalog(req, res, type, catalogId, search, pool) {
     const seen = new Set();
     for (const p of targets) {
       if (!p.runtime) continue;
-      const r = await callPlugin(p.runtime, "search", [search]);
-      if (!r.success || !Array.isArray(r.data)) continue;
+      // plugins may export search or getSearch (CloudStream naming)
+      const fn = p.api.includes("search")
+        ? "search"
+        : p.api.includes("getSearch")
+          ? "getSearch"
+          : null;
+      if (!fn) continue;
+      const r = await callPlugin(p.runtime, fn, [search]);
+      if (!r.success || !Array.isArray(r.data)) {
+        console.warn(
+          "plugin",
+          p.name,
+          "search failed:",
+          r.message || "no data",
+        );
+        continue;
+      }
       for (const item of r.data) {
         if (!item || !item.url || mapType(item.type) !== type) continue;
         if (seen.has(item.url)) continue;

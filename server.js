@@ -340,19 +340,21 @@ async function warmPlugin(plugin, pool) {
   plugin.warming = (async () => {
     if (plugin.sectionsTs && Date.now() - plugin.sectionsTs < CACHE_TTL_MS)
       return;
-    plugin.sections.clear();
-    plugin.metaCache.clear();
     const res = await callPlugin(plugin.runtime, "getHome", []);
     if (!res.success || !res.data || typeof res.data !== "object") {
       plugin.sectionsTs = Date.now(); // cache the failure so catalogs don't re-call on every request
+      plugin.status = "error";
+      plugin.error = res.message || "getHome failed";
       console.warn(
         "plugin",
         plugin.name,
         "getHome failed:",
         res.message || "no data",
       );
-      return;
+      return; // keep existing sections — stale catalogs beat empty ones
     }
+    plugin.sections.clear();
+    plugin.metaCache.clear();
     const sectionMap = Array.isArray(res.data)
       ? { [plugin.descriptor.name || plugin.name]: res.data }
       : res.data;
@@ -362,6 +364,8 @@ async function warmPlugin(plugin, pool) {
       plugin.sections.set(slugify(name), { name, type: firstType, items });
     }
     plugin.sectionsTs = Date.now();
+    plugin.status = "ok";
+    plugin.error = "";
     rebuildPrefixMap(pool);
     console.log(
       "plugin",
@@ -590,6 +594,15 @@ function handleDeletePlugin(req, res, id) {
 // ---------- addon handlers ----------
 
 function manifest(pool, req) {
+  // self-heal: if a plugin has no catalogs and hasn't been warmed recently,
+  // kick a background warm so the next fetch shows them (Render free tier
+  // spins down when idle; the boot warm can hit a transient failure)
+  for (const p of pool.plugins.values()) {
+    if (!p.sections.size && Date.now() - p.sectionsTs > CACHE_TTL_MS) {
+      warmAll().catch(() => {});
+      break;
+    }
+  }
   return {
     id: config.id || "com.stremio.addon",
     name: config.name || "Stremio Addon",

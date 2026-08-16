@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Plugin Host — Stremio Addon Manager</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%236d5df6'/%3E%3Cpath d='M9 22V10l7 7 7-7v12' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <svg class="brand-logo" viewBox="0 0 32 32" aria-hidden="true">
+          <rect width="32" height="32" rx="8" fill="url(#g)" />
+          <defs>
+            <linearGradient id="g" x1="0" y1="0" x2="32" y2="32">
+              <stop offset="0" stop-color="#6d5df6" />
+              <stop offset="1" stop-color="#a855f7" />
+            </linearGradient>
+          </defs>
+          <path
+            d="M9 22V10l7 7 7-7v12"
+            stroke="white"
+            stroke-width="3"
+            fill="none"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+        </svg>
+        <div class="brand-text">
+          <h1>Plugin Host</h1>
+          <p>Stremio addon manager</p>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <button
+          id="installAll"
+          class="btn btn-ghost"
+          hidden
+          title="Install all plugins as one addon"
+        >
+          <svg
+            viewBox="0 0 24 24"
+            width="16"
+            height="16"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path d="M12 3v12m0 0l-4-4m4 4l4-4" />
+            <path d="M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" />
+          </svg>
+          Install all
+        </button>
+        <button id="lockBtn" class="btn btn-ghost" hidden>
+          <svg
+            viewBox="0 0 24 24"
+            width="16"
+            height="16"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <rect x="4" y="11" width="16" height="10" rx="2" />
+            <path d="M8 11V7a4 4 0 018 0v4" />
+          </svg>
+          Unlock
+        </button>
+      </div>
+    </header>
+
+    <main class="container">
+      <section class="add-card">
+        <div class="add-card-head">
+          <h2>Add a plugin</h2>
+          <p>
+            Paste a GitHub plugin URL — it goes live instantly with its own
+            unique addon link.
+          </p>
+        </div>
+        <form id="addForm" class="add-form">
+          <input
+            id="urlInput"
+            type="url"
+            spellcheck="false"
+            autocomplete="off"
+            placeholder="https://github.com/user/repo/tree/main/plugin-folder"
+            required
+          />
+          <button type="submit" class="btn btn-primary" id="addBtn">
+            <span class="btn-label">Add plugin</span>
+            <span class="spinner" hidden></span>
+          </button>
+        </form>
+        <div id="addError" class="alert alert-error" hidden></div>
+      </section>
+
+      <section class="plugins-section">
+        <div class="section-head">
+          <h2>Your plugins</h2>
+          <span id="count" class="badge" hidden></span>
+        </div>
+        <div id="grid" class="grid"></div>
+        <div id="empty" class="empty" hidden>
+          <svg
+            viewBox="0 0 24 24"
+            width="48"
+            height="48"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path d="M12 3v12m0 0l-4-4m4 4l4-4" />
+            <path d="M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" />
+          </svg>
+          <h3>No plugins yet</h3>
+          <p>
+            Add your first plugin above — each one gets its own unique addon URL
+            you can install in Stremio.
+          </p>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <p>
+        Plugins are managed here — no config files. Each plugin runs sandboxed
+        in its own worker thread.
+      </p>
+    </footer>
+
+    <div id="toasts" class="toasts" aria-live="polite"></div>
+
+    <div id="lockModal" class="modal-backdrop" hidden>
+      <div
+        class="modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="lockTitle"
+      >
+        <h3 id="lockTitle">Admin access required</h3>
+        <p>
+          This instance is protected by an admin token. Enter it to manage
+          plugins.
+        </p>
+        <form id="lockForm">
+          <input
+            id="lockInput"
+            type="password"
+            placeholder="Admin token"
+            autocomplete="off"
+            required
+          />
+          <div class="modal-actions">
+            <button type="button" class="btn btn-ghost" id="lockCancel">
+              Cancel
+            </button>
+            <button type="submit" class="btn btn-primary">Unlock</button>
+          </div>
+        </form>
+        <div id="lockError" class="alert alert-error" hidden></div>
+      </div>
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

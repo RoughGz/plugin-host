@@ -183,14 +183,17 @@ async function main() {
     "globalThis.getHome = function(cb){ while(true){} };\n",
   );
 
-  // plugins.txt flow: two real plugins, zinkmovies first → its catalogs must
-  // appear on top. Network-dependent: boot survives, checks degrade to SKIP.
-  const pluginsTxtPath = path.join(__dirname, "plugins.txt");
-  const pluginsTxtBackup = fs.existsSync(pluginsTxtPath)
-    ? fs.readFileSync(pluginsTxtPath, "utf8")
+  // seed plugins: two real plugins, zinkmovies first → its catalogs must
+  // appear on top. Written as the legacy plugins.txt so boot exercises the
+  // one-time migration into data/plugins.json. Network-dependent: boot
+  // survives, checks degrade to SKIP.
+  const statePath = path.join(__dirname, "data", "plugins.json");
+  const stateBackup = fs.existsSync(statePath)
+    ? fs.readFileSync(statePath, "utf8")
     : null;
+  fs.rmSync(statePath, { force: true });
   fs.writeFileSync(
-    pluginsTxtPath,
+    path.join(__dirname, "plugins.txt"),
     "https://github.com/likhithkrishna1103-tech/Hindmovie/tree/main/zinkmovies\n" +
       "https://github.com/likhithkrishna1103-tech/Hindmovie/tree/main/anikage\n",
   );
@@ -218,8 +221,9 @@ async function main() {
     server.kill();
     fs.rmSync(testDir, { recursive: true, force: true });
     fs.rmSync(hangDir, { recursive: true, force: true });
-    if (pluginsTxtBackup === null) fs.rmSync(pluginsTxtPath, { force: true });
-    else fs.writeFileSync(pluginsTxtPath, pluginsTxtBackup);
+    fs.rmSync(path.join(__dirname, "plugins.txt"), { force: true });
+    if (stateBackup === null) fs.rmSync(statePath, { force: true });
+    else fs.writeFileSync(statePath, stateBackup);
     console.error("server failed to boot (port " + PORT + " in use?)");
     process.exit(1);
   }
@@ -239,14 +243,14 @@ async function main() {
       "got: " + catIds.join(", "),
     );
 
-    // plugins.txt: catalog order follows file order (zinkmovies first, anikage second)
+    // plugins.txt migration: catalog order follows file order (zinkmovies first, anikage second)
     const zkIdx = catIds.findIndex((id) => id.startsWith("zinkmovies_"));
     const akIdx = catIds.findIndex((id) => id.startsWith("anikage_"));
     const zkLast = catIds
       .map((id, i) => (id.startsWith("zinkmovies_") ? i : -1))
       .reduce((a, b) => Math.max(a, b), -1);
     if (zkIdx === -1 || akIdx === -1) {
-      warn("plugins.txt install (network): " + catIds.join(", "));
+      warn("plugins.txt migration (network): " + catIds.join(", "));
     } else {
       check(
         "catalog order = plugins.txt order",
@@ -415,56 +419,74 @@ async function main() {
     }
     if (!tested.size) {
       console.log(
-        "  no plugins installed to test (run: node add-plugin.js <plugin.js raw URL>)",
+        "  no plugins installed to test (add one from the dashboard)",
       );
     }
 
-    // plugins.txt is the only way to add/remove plugins: write a GitHub URL,
-    // the file watcher installs it and it goes live (hot reload); dropping
-    // the line removes the plugin dir and drops it from the manifest.
-    console.log("plugins.txt flow:");
+    // dashboard API is the only way to add/remove plugins: POST a GitHub URL,
+    // the plugin goes live with its own unique addon URL; DELETE removes it.
+    console.log("dashboard API flow:");
     try {
-      fs.rmSync(path.join(__dirname, "plugins", "moviblast"), {
-        recursive: true,
-        force: true,
+      const addRes = await fetch(base + "/api/plugins", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          url: "https://github.com/RougheHz/SkystreamPlugins/tree/main/moviblast",
+        }),
       });
-      fs.writeFileSync(
-        pluginsTxtPath,
-        "https://github.com/likhithkrishna1103-tech/Hindmovie/tree/main/anikage\n" +
-          "https://github.com/RougheHz/SkystreamPlugins/tree/main/moviblast\n",
+      const added = await addRes.json();
+      check(
+        "plugin added via API",
+        addRes.status === 201 && !!added.plugin && !!added.plugin.id,
+        JSON.stringify(added).slice(0, 200),
       );
-      const live = await waitFor(
-        async () => {
-          try {
-            const m = await getJson(base + "/manifest.json");
-            return m.catalogs.some((c) => c.id.startsWith("moviblast_"));
-          } catch (e) {
-            return false;
-          }
-        },
-        30000,
-        "moviblast catalog in manifest",
-      );
-      check("plugin installed from plugins.txt (hot reload)", live);
-      fs.writeFileSync(
-        pluginsTxtPath,
-        "https://github.com/likhithkrishna1103-tech/Hindmovie/tree/main/anikage\n",
-      );
-      const gone = await waitFor(
-        async () => {
-          try {
-            const m = await getJson(base + "/manifest.json");
-            return !m.catalogs.some((c) => c.id.startsWith("moviblast_"));
-          } catch (e) {
-            return false;
-          }
-        },
-        15000,
-        "moviblast gone from manifest",
-      );
-      check("plugin removed by dropping its plugins.txt line", gone);
+      if (addRes.status === 201) {
+        const pid = added.plugin.id;
+        const catIds = added.plugin.catalogs.map((c) => c.id);
+        // unique addon URL serves a manifest with only that plugin's catalogs
+        const m = await getJson(base + "/" + pid + "/manifest.json");
+        check(
+          "unique addon URL works",
+          m.catalogs.length > 0 &&
+            m.catalogs.every((c) => catIds.includes(c.id)),
+          JSON.stringify(m.catalogs).slice(0, 200),
+        );
+        // duplicate add → 409
+        const dup = await fetch(base + "/api/plugins", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            url: "https://github.com/RougheHz/SkystreamPlugins/tree/main/moviblast",
+          }),
+        });
+        check("duplicate add rejected", dup.status === 409);
+        // list includes it
+        const list = await getJson(base + "/api/plugins");
+        check(
+          "list includes plugin",
+          list.plugins.some((p) => p.id === pid),
+        );
+        // remove via API → gone from the all-plugins manifest
+        const del = await fetch(base + "/api/plugins/" + pid, {
+          method: "DELETE",
+        });
+        check("plugin removed via API", del.status === 200);
+        const gone = await waitFor(
+          async () => {
+            try {
+              const m2 = await getJson(base + "/manifest.json");
+              return !m2.catalogs.some((c) => catIds.includes(c.id));
+            } catch (e) {
+              return false;
+            }
+          },
+          15000,
+          "plugin gone from manifest",
+        );
+        check("plugin gone from manifest", gone);
+      }
     } catch (e) {
-      warn("plugins.txt flow: " + e.message);
+      warn("dashboard API flow: " + e.message);
     }
   } finally {
     server.kill();
@@ -478,8 +500,9 @@ async function main() {
       recursive: true,
       force: true,
     });
-    if (pluginsTxtBackup === null) fs.rmSync(pluginsTxtPath, { force: true });
-    else fs.writeFileSync(pluginsTxtPath, pluginsTxtBackup);
+    fs.rmSync(path.join(__dirname, "plugins.txt"), { force: true });
+    if (stateBackup === null) fs.rmSync(statePath, { force: true });
+    else fs.writeFileSync(statePath, stateBackup);
   }
   await sleep(800);
 

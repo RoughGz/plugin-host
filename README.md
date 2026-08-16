@@ -13,35 +13,41 @@ automatically respawned.
 > on its own — a malicious plugin could escape it and reach the worker thread.
 > `--disallow-code-generation-from-strings` is set at runtime (blocks the
 > classic `Buffer.constructor("return process")()` escape, while plugin code and
-> in-sandbox `eval` still work), and only the operator can install plugins
-> (`plugins.txt`). Only install plugins you trust.
+> in-sandbox `eval` still work). Only install plugins you trust. If the addon is
+> publicly reachable, set the `ADMIN_TOKEN` env var — the management API then
+> requires it (`x-admin-token` header; the dashboard asks for it once).
 
-## Add a plugin (plugins.txt only)
+## Manage plugins from the dashboard (no config files)
 
-**The one and only way — a plain text file.** Edit `plugins.txt` in the repo,
-one URL per line. Order matters: the first plugin's catalogs appear on top in
-Stremio, the second below, etc. Save → the running server installs and reloads
-automatically (on Render: edit the file on GitHub and push — auto-deploy does
-the rest):
+The web page (`/`) is the plugin manager. Paste a GitHub plugin URL → the plugin
+is fetched, validated, and goes live instantly with **its own unique addon
+URL**:
 
 ```
-https://github.com/likhithkrishna1103-tech/Hindmovie/tree/main/zinkmovies
-https://github.com/likhithkrishna1103-tech/Hindmovie/tree/main/anikage
+https://your-host.onrender.com/<plugin-id>/manifest.json
 ```
+
+- Add as many plugins as you want — each gets its own URL, installable in
+  Stremio independently (its manifest only lists that plugin's catalogs).
+- The dashboard shows every plugin as a card: status, catalogs, its addon URL
+  with **Copy link** / **Install in Stremio** buttons, and **Remove**.
+- `/manifest.json` (all plugins) still works for existing installs.
+- State lives in `data/plugins.json` (app-managed, gitignored). On first boot
+  after upgrading, an old `plugins.txt` is migrated automatically, then
+  forgotten.
 
 Any URL form works: `github.com/.../tree/<branch>/<folder>`,
 `github.com/.../blob/<branch>/<folder>/plugin.js`,
-`raw.githubusercontent.com/.../plugin.js`. Lines starting with `#` are comments.
-Only GitHub URLs are installable. Removing a line (or pushing a redeploy without
-it) removes that plugin.
-
-The addon's web page (`/`) shows the install URL with **Copy addon URL** and
-**Install in Stremio** buttons. There is no web add/remove — `plugins.txt` is
-the source of truth for what's installed.
+`raw.githubusercontent.com/.../plugin.js`. Only GitHub URLs are installable.
 
 Any plugin that exports `getHome` / `search` / `load` / `loadStreams` works:
 getHome sections become catalogs, load feeds meta (with episodes), loadStreams
 feeds streams.
+
+> **Render note:** the free tier's filesystem is ephemeral — plugins added via
+> the dashboard survive restarts but are reset on redeploy. Re-add them from the
+> dashboard after a deploy (or add a persistent disk / DB later if that
+> matters).
 
 ## Run
 
@@ -78,11 +84,14 @@ entity classes `MultimediaItem`, `Episode`, `StreamResult`, `Actor`, `Trailer`,
 ## Layout
 
 ```
-server.js          engine: catalog/meta/stream routing, magic-URL proxy, hot reload
-add-plugin.js      CLI: paste raw plugin.js URL → plugins/<name>/ (offline only)
+server.js          engine: plugin registry, management API, per-plugin addon
+                   URLs, catalog/meta/stream routing, magic-URL proxy
+public/            dashboard (index.html, app.js, styles.css)
 lib/worker.js      sandbox thread (vm context + host globals)
 lib/plugin-host.js worker lifecycle, timeout kill/respawn
+lib/plugin-url.js  GitHub URL normalization + plugin source fetching
 lib/mini-dom.js    dependency-free HTML parser + selector engine
 test.js            self-checks
+data/plugins.json  app-managed plugin state (gitignored)
 plugins/           one folder per plugin (plugin.js + plugin.json)
 ```

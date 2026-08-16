@@ -1,5 +1,0 @@
-# One plugin URL per line. Order matters: the first plugin's catalogs appear
-# on top in Stremio, the second below, and so on. Any URL form works:
-#   https://github.com/user/repo/tree/main/folder
-#   https://github.com/user/repo/blob/main/folder/plugin.js
-https://github.com/RougheHz/SkystreamPlugins/tree/main/moviblast

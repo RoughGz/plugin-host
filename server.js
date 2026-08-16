@@ -4,13 +4,18 @@ const path = require("node:path");
 const dns = require("node:dns").promises;
 const { Readable } = require("node:stream");
 const { PluginRuntime, callPlugin } = require("./lib/plugin-host");
-const { installPlugin, pluginNameFromUrl } = require("./lib/plugin-url");
+const { pluginNameFromUrl, fetchPluginSource } = require("./lib/plugin-url");
 
 const ROOT = __dirname;
 const PLUGINS_DIR = path.join(ROOT, "plugins");
-const PLUGINS_FILE = path.join(ROOT, "plugins.txt"); // one plugin URL per line; order = catalog order
-fs.mkdirSync(PLUGINS_DIR, { recursive: true }); // git ignores empty dirs; fs.watch below needs it to exist
+const DATA_DIR = path.join(ROOT, "data");
+const STATE_FILE = path.join(DATA_DIR, "plugins.json");
+fs.mkdirSync(PLUGINS_DIR, { recursive: true }); // dev/test plugins; git ignores empty dirs
+fs.mkdirSync(DATA_DIR, { recursive: true });
 const PORT = process.env.PORT || 3999;
+// optional: set ADMIN_TOKEN to require it (x-admin-token header) for the
+// management API — plugins run arbitrary code, so gate who can add them
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";
 const CACHE_TTL_MS = 10 * 60 * 1000;
 const META_CACHE_MAX = 200;
 const DEFAULT_UA =
@@ -23,7 +28,71 @@ try {
   console.error("config.json missing/invalid:", e.message);
 }
 
-const plugins = new Map(); // name -> { name, dir, descriptor, runtime, sections, sectionsTs, metaCache }
+// ---------- state: data/plugins.json ----------
+// App-managed runtime state (NOT a static config file — the dashboard is the
+// only way to change it). One-time migration from the old plugins.txt.
+let state = []; // [{id, name, url, addedAt}]
+
+function loadState() {
+  try {
+    state = JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
+    if (!Array.isArray(state)) state = [];
+    return;
+  } catch (e) {
+    state = [];
+  }
+  try {
+    const txt = fs.readFileSync(path.join(ROOT, "plugins.txt"), "utf8");
+    const seen = new Set();
+    for (const url of txt
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean)) {
+      const name = pluginNameFromUrl(url) || "plugin";
+      let id = slugify(name);
+      let n = 2;
+      while (seen.has(id)) id = slugify(name) + "-" + n++;
+      seen.add(id);
+      state.push({ id, name, url, addedAt: Date.now() });
+    }
+    if (state.length) {
+      saveState();
+      console.log("migrated", state.length, "plugins from plugins.txt");
+    }
+  } catch (e) {
+    // no plugins.txt — fresh start, dashboard is the manager
+  }
+}
+
+function saveState() {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+}
+
+// ---------- plugin registry ----------
+
+const plugins = new Map(); // id -> plugin
+const globalPool = { plugins, prefixMap: new Map() };
+
+function makePlugin(id, name, code, descriptor) {
+  return {
+    id,
+    name,
+    descriptor,
+    sections: new Map(),
+    sectionsTs: 0,
+    metaCache: new Map(),
+    status: "ok",
+    error: "",
+    runtime: new PluginRuntime(name, code, descriptor, {
+      verifyUA: descriptor.verifyUA || null,
+    }),
+  };
+}
+
+function destroyPool(pool) {
+  for (const p of pool.plugins.values()) if (p.runtime) p.runtime.destroy();
+}
 
 function publicBase(req) {
   return (
@@ -39,6 +108,14 @@ function slugify(s) {
       .replace(/[^a-z0-9]+/g, "_")
       .replace(/^_+|_+$/g, "") || "home"
   );
+}
+
+function uniqueId(base) {
+  let id = base;
+  let n = 2;
+  while (plugins.has(id) || state.some((e) => e.id === id))
+    id = base + "-" + n++;
+  return id;
 }
 
 const TYPE_MAP = {
@@ -190,90 +267,81 @@ function filenameFromUrl(u) {
   }
 }
 
-const pluginOrder = []; // plugins.txt order = catalog order
+// ---------- plugin loading ----------
 
-async function installFromUrlsFile() {
-  pluginOrder.length = 0; // plugins.txt is the single source of truth
-  if (!fs.existsSync(PLUGINS_FILE)) return;
-  let lines;
-  try {
-    lines = fs.readFileSync(PLUGINS_FILE, "utf8").split("\n");
-  } catch (e) {
-    console.warn("plugins.txt unreadable:", e.message);
-    return;
-  }
-  for (const rawLine of lines) {
-    const url = rawLine.trim().replace(/#.*$/, "").trim();
-    if (!url) continue;
-    const name = pluginNameFromUrl(url);
-    if (!name) {
-      console.warn("plugins.txt: skipping unrecognized URL:", url);
-      continue;
-    }
-    if (!pluginOrder.includes(name)) pluginOrder.push(name);
-    if (fs.existsSync(path.join(PLUGINS_DIR, name, "plugin.js"))) continue;
-    try {
-      await installPlugin(url, PLUGINS_DIR);
-      console.log("installed plugin from plugins.txt:", name);
-    } catch (e) {
-      console.warn("plugins.txt:", name, "failed:", e.message);
-    }
-  }
-}
-
-function loadPlugins() {
-  for (const p of plugins.values()) p.runtime.destroy();
+// Load every state entry (fetch source, install to plugins/<id>/, spawn
+// runtime) plus any dev/test plugin dirs dropped into plugins/ by hand.
+async function loadFromState() {
+  for (const p of plugins.values()) if (p.runtime) p.runtime.destroy();
   plugins.clear();
-  let found = false;
-  for (const entry of fs.readdirSync(PLUGINS_DIR, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
-    const dir = path.join(PLUGINS_DIR, entry.name);
-    const jsPath = path.join(dir, "plugin.js");
-    if (!fs.existsSync(jsPath)) continue;
-    found = true;
-    let descriptor = {};
-    const jsonPath = path.join(dir, "plugin.json");
+  globalPool.prefixMap.clear();
+  for (const entry of state) {
     try {
-      descriptor = JSON.parse(fs.readFileSync(jsonPath, "utf8"));
+      const { name, code, descriptor } = await fetchPluginSource(entry.url);
+      const plugin = makePlugin(entry.id, name, code, descriptor);
+      writePluginFiles(plugin, code, descriptor);
+      plugins.set(entry.id, plugin);
+      console.log("loaded plugin:", entry.id);
+    } catch (e) {
+      console.warn("plugin", entry.id, "failed to load:", e.message);
+      plugins.set(entry.id, {
+        id: entry.id,
+        name: entry.name,
+        descriptor: {},
+        sections: new Map(),
+        sectionsTs: 0,
+        metaCache: new Map(),
+        status: "error",
+        error: e.message,
+        runtime: null,
+      });
+    }
+  }
+  // dev/test: plugin dirs not managed by state (hot reload picks them up)
+  for (const entry of fs.readdirSync(PLUGINS_DIR, { withFileTypes: true })) {
+    if (!entry.isDirectory() || plugins.has(entry.name)) continue;
+    const jsPath = path.join(PLUGINS_DIR, entry.name, "plugin.js");
+    if (!fs.existsSync(jsPath)) continue;
+    let descriptor = {};
+    try {
+      descriptor = JSON.parse(
+        fs.readFileSync(
+          path.join(PLUGINS_DIR, entry.name, "plugin.json"),
+          "utf8",
+        ),
+      );
     } catch (e) {
       // plugin.json optional
     }
-    const code = fs.readFileSync(jsPath, "utf8");
-    const plugin = {
-      name: entry.name,
-      dir,
+    const plugin = makePlugin(
+      entry.name,
+      entry.name,
+      fs.readFileSync(jsPath, "utf8"),
       descriptor,
-      sections: new Map(),
-      sectionsTs: 0,
-      metaCache: new Map(),
-      runtime: new PluginRuntime(entry.name, code, descriptor, {
-        verifyUA: descriptor.verifyUA || null,
-      }),
-    };
+    );
+    plugin.dir = path.join(PLUGINS_DIR, entry.name);
     plugins.set(entry.name, plugin);
-    console.log("loaded plugin:", entry.name);
+    console.log("loaded dev plugin:", entry.name);
   }
-  if (!found) console.warn("no plugins found in", PLUGINS_DIR);
-  const ordered = [];
-  for (const name of pluginOrder) {
-    const p = plugins.get(name);
-    if (p) ordered.push(p);
-  }
-  for (const [name, p] of plugins)
-    if (!pluginOrder.includes(name)) ordered.push(p);
-  plugins.clear();
-  for (const p of ordered) plugins.set(p.name, p);
   return [...plugins.values()];
 }
 
-async function warmPlugin(plugin, force) {
+function writePluginFiles(plugin, code, descriptor) {
+  plugin.dir = path.join(PLUGINS_DIR, plugin.id);
+  fs.mkdirSync(plugin.dir, { recursive: true });
+  fs.writeFileSync(path.join(plugin.dir, "plugin.js"), code);
+  if (descriptor && Object.keys(descriptor).length)
+    fs.writeFileSync(
+      path.join(plugin.dir, "plugin.json"),
+      JSON.stringify(descriptor, null, 2),
+    );
+}
+
+async function warmPlugin(plugin, pool) {
+  if (!plugin.runtime) return;
   if (plugin.warming) return plugin.warming;
   plugin.warming = (async () => {
-    if (
-      !force &&
-      plugin.sectionsTs &&
-      Date.now() - plugin.sectionsTs < CACHE_TTL_MS
-    )
+    if (plugin.sectionsTs && Date.now() - plugin.sectionsTs < CACHE_TTL_MS)
       return;
     plugin.sections.clear();
     plugin.metaCache.clear();
@@ -297,7 +365,7 @@ async function warmPlugin(plugin, force) {
       plugin.sections.set(slugify(name), { name, type: firstType, items });
     }
     plugin.sectionsTs = Date.now();
-    rebuildPrefixMap();
+    rebuildPrefixMap(pool);
     console.log(
       "plugin",
       plugin.name,
@@ -310,52 +378,53 @@ async function warmPlugin(plugin, force) {
   return plugin.warming;
 }
 
-async function warmAll(force) {
+async function warmAll() {
   await Promise.all(
     [...plugins.values()].map((p) =>
-      warmPlugin(p, force).catch((e) =>
+      warmPlugin(p, globalPool).catch((e) =>
         console.warn("warm", p.name, "failed:", e.message),
       ),
     ),
   );
-  return catalogList();
+  return catalogList(globalPool);
 }
 
-function rebuildPrefixMap() {
-  prefixMap.clear();
-  for (const p of plugins.values()) {
+function rebuildPrefixMap(pool) {
+  pool.prefixMap.clear();
+  for (const p of pool.plugins.values()) {
     if (p.descriptor.idPrefix)
-      prefixMap.set(String(p.descriptor.idPrefix).replace(/\/$/, ""), p.name);
+      pool.prefixMap.set(
+        String(p.descriptor.idPrefix).replace(/\/$/, ""),
+        p.name,
+      );
     for (const { items } of p.sections.values()) {
       for (const item of items) {
         if (!item.url || typeof item.url !== "string") continue;
         try {
           const origin = new URL(item.url).origin;
-          prefixMap.set(origin, p.name);
+          pool.prefixMap.set(origin, p.name);
         } catch (e) {}
       }
     }
   }
 }
 
-const prefixMap = new Map();
-
-function pluginForId(id) {
+function pluginForId(id, pool) {
   if (!id || typeof id !== "string") return null;
   let best = null;
-  for (const [prefix, name] of prefixMap) {
+  for (const [prefix, name] of pool.prefixMap) {
     if (id.startsWith(prefix) && (!best || prefix.length > best.prefix.length))
       best = { prefix, name };
   }
-  if (best) return plugins.get(best.name);
-  if (plugins.size === 1) return [...plugins.values()][0];
+  if (best) return pool.plugins.get(best.name);
+  if (pool.plugins.size === 1) return [...pool.plugins.values()][0];
   return null;
 }
 
-function catalogList() {
-  const multi = plugins.size > 1;
+function catalogList(pool) {
+  const multi = pool.plugins.size > 1;
   const out = [];
-  for (const p of plugins.values()) {
+  for (const p of pool.plugins.values()) {
     const label = p.descriptor.name || p.name;
     const prefix = p.descriptor.catalogPrefix || p.name;
     for (const [slug, section] of p.sections) {
@@ -369,8 +438,8 @@ function catalogList() {
   return out;
 }
 
-function findCatalog(catalogId) {
-  for (const p of plugins.values()) {
+function findCatalog(pool, catalogId) {
+  for (const p of pool.plugins.values()) {
     const prefix = p.descriptor.catalogPrefix || p.name;
     if (catalogId.startsWith(prefix + "_")) {
       const section = p.sections.get(catalogId.slice(prefix.length + 1));
@@ -378,6 +447,16 @@ function findCatalog(catalogId) {
     }
   }
   return null;
+}
+
+// single-plugin pool for a plugin's own addon URL
+function poolFor(plugin) {
+  const pool = {
+    plugins: new Map([[plugin.id, plugin]]),
+    prefixMap: new Map(),
+  };
+  rebuildPrefixMap(pool);
+  return pool;
 }
 
 function cachePut(map, key, ts, value) {
@@ -396,6 +475,7 @@ function cachePut(map, key, ts, value) {
 }
 
 async function getRawItem(plugin, metaId) {
+  if (!plugin.runtime) return null;
   const cached = plugin.metaCache.get(metaId);
   if (cached && Date.now() - cached.ts < CACHE_TTL_MS) return cached.value;
   const res = await callPlugin(plugin.runtime, "load", [metaId]);
@@ -404,7 +484,7 @@ async function getRawItem(plugin, metaId) {
   return res.data;
 }
 
-// ---------- handlers ----------
+// ---------- helpers ----------
 
 function sendJson(res, status, obj) {
   const body = JSON.stringify(obj);
@@ -417,104 +497,128 @@ function sendJson(res, status, obj) {
   res.end(body);
 }
 
-function esc(s) {
-  return String(s)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
-
-function homePage(req) {
-  const base = publicBase(req);
-  const manifestUrl = base + "/manifest.json";
-  const installHref =
-    "stremio://" + base.replace(/^https?:\/\//, "") + "/manifest.json";
-  const title = esc(config.name || "Plugin Host");
-  const desc = esc(config.description || "");
-  const items = [];
-  for (const [name, p] of plugins) {
-    const cats = p.sections.size;
-    items.push(
-      "<li class='plug'><div class='plug-info'><strong>" +
-        esc(name) +
-        "</strong><span class='sub'>" +
-        esc(p.descriptor.name || "no plugin.json") +
-        (cats ? " · " + cats + " catalog" + (cats > 1 ? "s" : "") : "") +
-        "</span></div></li>",
-    );
+async function readBody(req, maxBytes) {
+  const chunks = [];
+  let size = 0;
+  for await (const c of req) {
+    size += c.length;
+    if (size > maxBytes) throw new Error("body too large");
+    chunks.push(c);
   }
-  return (
-    "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>" +
-    "<title>" +
-    title +
-    "</title><style>" +
-    "body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;margin:0;background:#0f1117;color:#e6e8ee}" +
-    ".wrap{max-width:720px;margin:0 auto;padding:32px 20px 64px}" +
-    "header{margin-bottom:28px}h1{margin:0 0 6px;font-size:26px}h1 span{color:#7c5cff}" +
-    ".sub{color:#9aa0ae;font-size:14px;line-height:1.5}" +
-    ".card{background:#171a23;border:1px solid #262a36;border-radius:12px;padding:20px;margin-bottom:16px}" +
-    "h2{margin:0 0 12px;font-size:16px;color:#cdd2de}" +
-    ".urlbox{display:flex;gap:8px;margin-bottom:12px}" +
-    ".urlbox input{flex:1;min-width:0;background:#0f1117;border:1px solid #2c3140;color:#9fe6a0;font-family:ui-monospace,monospace;font-size:13px;border-radius:8px;padding:10px}" +
-    "button{cursor:pointer;border:none;border-radius:8px;padding:10px 14px;font-size:13px;font-weight:600}" +
-    ".btn{background:#7c5cff;color:#fff}.btn:hover{background:#8d71ff}" +
-    ".btn-ghost{background:#232838;color:#e6e8ee;border:1px solid #2c3140}.btn-ghost:hover{background:#2b3142}" +
-    ".btns{display:flex;gap:8px;flex-wrap:wrap}" +
-    "a.install{text-decoration:none;display:inline-block;text-align:center}" +
-    "ul{list-style:none;margin:0;padding:0}.plug{display:flex;align-items:center;justify-content:space-between;gap:12px;background:#14161e;border:1px solid #232836;border-radius:8px;padding:12px 14px;margin-bottom:8px}" +
-    ".plug-info{display:flex;flex-direction:column;gap:2px;min-width:0;word-break:break-all}" +
-    ".plug .sub{font-size:12px}" +
-    "footer{color:#6b7180;font-size:12px;margin-top:24px;line-height:1.6}" +
-    "code{background:#232838;padding:1px 5px;border-radius:4px;font-size:12px}" +
-    "</style></head><body><div class='wrap'>" +
-    "<header><h1><span>▶</span> " +
-    title +
-    "</h1>" +
-    (desc ? "<div class='sub'>" + desc + "</div>" : "") +
-    "</header>" +
-    "<div class='card'><h2>Your addon URL</h2>" +
-    "<div class='urlbox'><input id='url' readonly value='" +
-    manifestUrl +
-    "' onclick='this.select()'></div>" +
-    "<div class='btns'>" +
-    "<button class='btn' onclick='copyUrl()' id='copyBtn'>Copy addon URL</button>" +
-    "<a class='install btn' href='" +
-    installHref +
-    "'>Install in Stremio</a>" +
-    "<button class='btn-ghost' onclick='window.open(\"" +
-    manifestUrl +
-    "\")'>Open manifest</button>" +
-    "</div></div>" +
-    "<div class='card'><h2>Installed plugins (" +
-    plugins.size +
-    ")</h2><ul>" +
-    (items.length
-      ? items.join("")
-      : "<li class='plug'><span class='sub'>none yet — add plugin URLs to <code>plugins.txt</code></span></li>") +
-    "</ul></div>" +
-    "<footer>Plugins are configured in <code>plugins.txt</code> (one GitHub plugin URL per line) — edit the file or redeploy to change them. " +
-    "All users of this addon share the same plugins.</footer>" +
-    "</div><script>" +
-    "const url=document.getElementById('url');" +
-    "async function copyUrl(){const b=document.getElementById('copyBtn');" +
-    "try{await navigator.clipboard.writeText(url.value)}catch(e){url.select();document.execCommand('copy')}" +
-    "b.textContent='copied!';setTimeout(()=>b.textContent='Copy addon URL',1500)}" +
-    "</script></body></html>"
-  );
+  return Buffer.concat(chunks).toString("utf8");
 }
 
-// ---------- handlers ----------
+// ---------- management API ----------
 
-async function handleCatalog(req, res, type, catalogId, search) {
-  let found = findCatalog(catalogId);
+function adminOk(req) {
+  return !ADMIN_TOKEN || req.headers["x-admin-token"] === ADMIN_TOKEN;
+}
+
+function publicPlugin(entry, req) {
+  const p = plugins.get(entry.id);
+  const out = {
+    id: entry.id,
+    name: entry.name,
+    url: entry.url,
+    status: p ? p.status : "error",
+    error: p ? p.error : "not loaded",
+    catalogs: [],
+    addonUrl: publicBase(req) + "/" + entry.id + "/manifest.json",
+    addedAt: entry.addedAt,
+  };
+  if (p) {
+    const prefix = p.descriptor.catalogPrefix || p.name;
+    out.catalogs = [...p.sections.entries()].map(([slug, s]) => ({
+      id: prefix + "_" + slug,
+      type: s.type,
+      name: s.name,
+    }));
+  }
+  return out;
+}
+
+function handleListPlugins(req, res) {
+  sendJson(res, 200, { plugins: state.map((e) => publicPlugin(e, req)) });
+}
+
+// POST /api/plugins {url} — fetch + validate the plugin, install it, and hand
+// back its unique addon URL. No config files involved.
+async function handleAddPlugin(req, res) {
+  let body;
+  try {
+    body = JSON.parse(await readBody(req, 16384));
+  } catch (e) {
+    return sendJson(res, 400, { error: "bad json body" });
+  }
+  const url = body && typeof body.url === "string" ? body.url.trim() : "";
+  if (!url) return sendJson(res, 400, { error: "missing url" });
+  if (state.some((e) => e.url === url))
+    return sendJson(res, 409, { error: "plugin already added" });
+  let source;
+  try {
+    source = await fetchPluginSource(url);
+  } catch (e) {
+    return sendJson(res, 400, { error: e.message });
+  }
+  const id = uniqueId(slugify(source.name));
+  const plugin = makePlugin(id, source.name, source.code, source.descriptor);
+  const pool = { plugins: new Map([[id, plugin]]), prefixMap: new Map() };
+  await warmPlugin(plugin, pool);
+  if (!plugin.sections.size) {
+    plugin.runtime.destroy();
+    return sendJson(res, 400, {
+      error: "plugin has no catalogs (getHome failed?)",
+    });
+  }
+  writePluginFiles(plugin, source.code, source.descriptor);
+  state.push({ id, name: source.name, url, addedAt: Date.now() });
+  saveState();
+  plugins.set(id, plugin);
+  rebuildPrefixMap(globalPool);
+  console.log("added plugin:", id, "<-", url);
+  sendJson(res, 201, { plugin: publicPlugin(state[state.length - 1], req) });
+}
+
+// DELETE /api/plugins/:id — stop the runtime, drop the files, forget it
+function handleDeletePlugin(req, res, id) {
+  const idx = state.findIndex((e) => e.id === id);
+  if (idx < 0) return sendJson(res, 404, { error: "plugin not found" });
+  const plugin = plugins.get(id);
+  if (plugin && plugin.runtime) plugin.runtime.destroy();
+  plugins.delete(id);
+  fs.rmSync(path.join(PLUGINS_DIR, id), { recursive: true, force: true });
+  state.splice(idx, 1);
+  saveState();
+  rebuildPrefixMap(globalPool);
+  console.log("removed plugin:", id);
+  sendJson(res, 200, { ok: true });
+}
+
+// ---------- addon handlers ----------
+
+function manifest(pool, req) {
+  return {
+    id: config.id || "com.stremio.addon",
+    name: config.name || "Stremio Addon",
+    description: config.description || "",
+    logo: config.logo || "",
+    version: "0.1.0",
+    resources: ["catalog", "meta", "stream"],
+    types: ["movie", "series"],
+    catalogs: catalogList(pool),
+  };
+}
+
+async function handleCatalog(req, res, type, catalogId, search, pool) {
+  const found = findCatalog(pool, catalogId);
   let items = [];
   if (search) {
     // Stremio's global search hits /catalog/<type>/top.json?search=... (and any
-    // other unknown id) — route it to every plugin's search and merge
-    const targets = found ? [found.plugin] : [...plugins.values()];
+    // other unknown id) — route it to the pool's plugins' search and merge
+    const targets = found ? [found.plugin] : [...pool.plugins.values()];
     const seen = new Set();
     for (const p of targets) {
+      if (!p.runtime) continue;
       const r = await callPlugin(p.runtime, "search", [search]);
       if (!r.success || !Array.isArray(r.data)) continue;
       for (const item of r.data) {
@@ -528,14 +632,14 @@ async function handleCatalog(req, res, type, catalogId, search) {
     if (!found)
       return sendJson(res, 404, { error: "unknown catalog: " + catalogId });
     if (Date.now() - found.plugin.sectionsTs > CACHE_TTL_MS)
-      await warmPlugin(found.plugin);
+      await warmPlugin(found.plugin, pool);
     items = found.section.items;
   }
   sendJson(res, 200, { metas: items.map(mapItem).filter((m) => m.id) });
 }
 
-async function handleMeta(req, res, type, id) {
-  const plugin = pluginForId(id);
+async function handleMeta(req, res, type, id, pool) {
+  const plugin = pluginForId(id, pool);
   if (!plugin) return sendJson(res, 404, { error: "no plugin for id: " + id });
   const item = await getRawItem(plugin, id);
   if (!item) return sendJson(res, 404, { error: "meta not found" });
@@ -543,6 +647,7 @@ async function handleMeta(req, res, type, id) {
 }
 
 async function resolveStreams(plugin, metaId, season, episode) {
+  if (!plugin.runtime) return [];
   let raw = [];
   if (season !== null) {
     const item = await getRawItem(plugin, metaId);
@@ -577,14 +682,13 @@ async function resolveStreams(plugin, metaId, season, episode) {
   return raw;
 }
 
-async function handleStream(req, res, type, id) {
+async function handleStream(req, res, type, id, pool, base) {
   const m = /^(.*):(\d+):(\d+)$/.exec(id);
   const metaId = m ? m[1] : id;
   const season = m ? +m[2] : null;
   const episode = m ? +m[3] : null;
-  const plugin = pluginForId(metaId);
+  const plugin = pluginForId(metaId, pool);
   if (!plugin) return sendJson(res, 404, { error: "no plugin for id: " + id });
-  const base = publicBase(req);
 
   // no stream cache on purpose: plugins hand out short-lived signed URLs
   // (e.g. moviblast verify= tokens), so mint fresh on every request
@@ -688,8 +792,8 @@ async function proxyFetch(url, extraHeaders, req, res) {
   }
 }
 
-async function handleProxy(req, res) {
-  const payload = decodeURIComponent(req.url.split("/").slice(2).join("/"));
+async function handleProxy(req, res, payloadPath) {
+  const payload = decodeURIComponent(payloadPath);
   let decoded;
   try {
     decoded = Buffer.from(payload, "base64url").toString("utf8");
@@ -757,6 +861,34 @@ async function handleProxy(req, res) {
   await proxyFetch(url, extraHeaders, req, res);
 }
 
+// ---------- static dashboard ----------
+
+const STATIC_FILES = {
+  "/": { file: "index.html", type: "text/html; charset=utf-8" },
+  "/app.js": { file: "app.js", type: "text/javascript; charset=utf-8" },
+  "/styles.css": { file: "styles.css", type: "text/css; charset=utf-8" },
+};
+
+function serveStatic(req, res, url) {
+  const entry = STATIC_FILES[url];
+  if (!entry) return false;
+  const file = path.join(ROOT, "public", entry.file);
+  if (!fs.existsSync(file)) {
+    sendJson(res, 500, { error: "dashboard files missing" });
+    return true;
+  }
+  res.writeHead(200, {
+    "Content-Type": entry.type,
+    "Cache-Control": "no-cache",
+  });
+  res.end(fs.readFileSync(file));
+  return true;
+}
+
+// ---------- router ----------
+
+const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
 const server = http.createServer(async (req, res) => {
   const url = req.url.split("?")[0];
   const query = new URLSearchParams(req.url.split("?")[1] || "");
@@ -769,24 +901,72 @@ const server = http.createServer(async (req, res) => {
       });
       return res.end();
     }
-    if (url === "/") {
-      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-      return res.end(homePage(req));
+
+    // ---- management API ----
+    if (url.startsWith("/api/")) {
+      if (!adminOk(req)) return sendJson(res, 401, { error: "unauthorized" });
+      if (url === "/api/plugins" && req.method === "GET")
+        return handleListPlugins(req, res);
+      if (url === "/api/plugins" && req.method === "POST")
+        return handleAddPlugin(req, res);
+      const delM = /^\/api\/plugins\/([A-Za-z0-9_-]+)$/.exec(url);
+      if (delM && req.method === "DELETE")
+        return handleDeletePlugin(req, res, delM[1]);
+      return sendJson(res, 404, { error: "not found" });
     }
-    if (url === "/manifest.json") {
-      return sendJson(res, 200, {
-        id: config.id || "com.stremio.addon",
-        name: config.name || "Stremio Addon",
-        description: config.description || "",
-        logo: config.logo || "",
-        version: "0.1.0",
-        resources: ["catalog", "meta", "stream"],
-        types: ["movie", "series"],
-        catalogs: catalogList(),
-      });
+
+    // ---- dashboard ----
+    if (serveStatic(req, res, url)) return;
+
+    // ---- per-plugin addon URLs: /<id>/<route> ----
+    const pluginM = /^\/([A-Za-z0-9_-]{1,64})\/(.+)$/.exec(url);
+    if (pluginM && plugins.has(pluginM[1])) {
+      const id = pluginM[1];
+      const rest = "/" + pluginM[2];
+      const plugin = plugins.get(id);
+      const pool = poolFor(plugin);
+      const base = publicBase(req) + "/" + id;
+      if (rest === "/manifest.json")
+        return sendJson(res, 200, manifest(pool, req));
+      const proxyM = /^\/proxy\/(.+)$/.exec(rest);
+      if (proxyM) return handleProxy(req, res, proxyM[1]);
+      const catM = /^\/catalog\/(movie|series)\/([^/]+)\.json$/.exec(rest);
+      if (catM)
+        return handleCatalog(
+          req,
+          res,
+          catM[1],
+          decodeURIComponent(catM[2]),
+          query.get("search"),
+          pool,
+        );
+      const metaM = /^\/meta\/(movie|series)\/([^/]+)\.json$/.exec(rest);
+      if (metaM)
+        return handleMeta(
+          req,
+          res,
+          metaM[1],
+          decodeURIComponent(metaM[2]),
+          pool,
+        );
+      const streamM = /^\/stream\/(movie|series)\/([^/]+)\.json$/.exec(rest);
+      if (streamM)
+        return handleStream(
+          req,
+          res,
+          streamM[1],
+          decodeURIComponent(streamM[2]),
+          pool,
+          base,
+        );
+      return sendJson(res, 404, { error: "not found" });
     }
+
+    // ---- default addon (all plugins) ----
+    if (url === "/manifest.json")
+      return sendJson(res, 200, manifest(globalPool, req));
     const proxyM = /^\/proxy\/(.+)$/.exec(url);
-    if (proxyM) return handleProxy(req, res);
+    if (proxyM) return handleProxy(req, res, proxyM[1]);
     const catM = /^\/catalog\/(movie|series)\/([^/]+)\.json$/.exec(url);
     if (catM)
       return handleCatalog(
@@ -795,13 +975,27 @@ const server = http.createServer(async (req, res) => {
         catM[1],
         decodeURIComponent(catM[2]),
         query.get("search"),
+        globalPool,
       );
     const metaM = /^\/meta\/(movie|series)\/([^/]+)\.json$/.exec(url);
     if (metaM)
-      return handleMeta(req, res, metaM[1], decodeURIComponent(metaM[2]));
+      return handleMeta(
+        req,
+        res,
+        metaM[1],
+        decodeURIComponent(metaM[2]),
+        globalPool,
+      );
     const streamM = /^\/stream\/(movie|series)\/([^/]+)\.json$/.exec(url);
     if (streamM)
-      return handleStream(req, res, streamM[1], decodeURIComponent(streamM[2]));
+      return handleStream(
+        req,
+        res,
+        streamM[1],
+        decodeURIComponent(streamM[2]),
+        globalPool,
+        publicBase(req),
+      );
     sendJson(res, 404, { error: "not found" });
   } catch (e) {
     console.error("request error:", e);
@@ -809,48 +1003,32 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-// hot reload: any change under plugins/ or plugins.txt → reload + re-warm.
+// hot reload: any change under plugins/ → reload + re-warm (dev/test only).
 // Serialized; events during boot are ignored (boot loads everything itself).
+// Writes made by the management API are skipped (they manage state directly).
 let booting = true;
+let lastSelfWrite = 0;
 let reloadTimer = null;
 let reloadChain = Promise.resolve();
 const reloadNow = () => {
-  if (booting) return;
+  if (booting || Date.now() - lastSelfWrite < 1000) return;
   clearTimeout(reloadTimer);
   reloadTimer = setTimeout(() => {
     reloadChain = reloadChain
       .then(async () => {
         console.log("plugins changed — reloading");
-        await installFromUrlsFile();
-        // plugins.txt governs the full set: drop dirs whose plugin is no
-        // longer listed (removing a line = removing the plugin)
-        for (const entry of fs.readdirSync(PLUGINS_DIR, {
-          withFileTypes: true,
-        })) {
-          if (!entry.isDirectory() || pluginOrder.includes(entry.name))
-            continue;
-          fs.rmSync(path.join(PLUGINS_DIR, entry.name), {
-            recursive: true,
-            force: true,
-          });
-        }
-        loadPlugins();
-        await warmAll(true);
+        await loadFromState();
+        await warmAll();
       })
       .catch((e) => console.warn("reload failed:", e.message));
   }, 500);
 };
 fs.watch(PLUGINS_DIR, { recursive: true }, () => reloadNow());
-try {
-  fs.watch(PLUGINS_FILE, () => reloadNow());
-} catch (e) {
-  // plugins.txt optional
-}
 
 async function boot() {
-  await installFromUrlsFile();
-  loadPlugins();
-  await warmAll(true);
+  loadState();
+  await loadFromState();
+  await warmAll();
   booting = false;
   server.listen(PORT, () =>
     console.log("addon listening on http://localhost:" + PORT),
@@ -858,12 +1036,12 @@ async function boot() {
 }
 
 // refresh catalogs periodically so the manifest stays current
-setInterval(() => warmAll(true).catch(() => {}), 30 * 60 * 1000).unref();
+setInterval(() => warmAll().catch(() => {}), 30 * 60 * 1000).unref();
 
 function shutdown() {
   console.log("shutting down");
   server.close();
-  for (const p of plugins.values()) p.runtime.destroy();
+  destroyPool(globalPool);
   process.exit(0);
 }
 process.on("SIGTERM", shutdown);

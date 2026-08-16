@@ -28,42 +28,166 @@ try {
 // ---------- state: data/plugins.json ----------
 // App-managed runtime state (NOT a static config file — the dashboard is the
 // only way to change it). One-time migration from the old plugins.txt.
+// Render's free tier wipes the filesystem on redeploy AND idle spin-down, so
+// when GITHUB_TOKEN is set the state is also mirrored to the repo's `state`
+// branch and restored from there at boot — plugins survive redeploys.
 let state = []; // [{id, name, url, addedAt}]
+
+const GITHUB_REPO = process.env.GITHUB_REPO || config.githubRepo || "";
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN || "";
+const STATE_BRANCH = "state";
+const STATE_PATH = "data/plugins.json";
+
+function ghHeaders() {
+  return {
+    Authorization: "Bearer " + GITHUB_TOKEN,
+    "User-Agent": "plugin-host",
+    Accept: "application/vnd.github+json",
+  };
+}
+
+async function ensureStateBranch() {
+  const ref = await fetch(
+    "https://api.github.com/repos/" +
+      GITHUB_REPO +
+      "/git/ref/heads/" +
+      STATE_BRANCH,
+    { headers: ghHeaders() },
+  );
+  if (ref.ok) return;
+  const repo = await (
+    await fetch("https://api.github.com/repos/" + GITHUB_REPO, {
+      headers: ghHeaders(),
+    })
+  ).json();
+  if (!repo.default_branch)
+    throw new Error("github api: " + (repo.message || "repo lookup failed"));
+  const head = await (
+    await fetch(
+      "https://api.github.com/repos/" +
+        GITHUB_REPO +
+        "/git/ref/heads/" +
+        repo.default_branch,
+      { headers: ghHeaders() },
+    )
+  ).json();
+  if (!head.object)
+    throw new Error("github api: " + (head.message || "ref lookup failed"));
+  await fetch("https://api.github.com/repos/" + GITHUB_REPO + "/git/refs", {
+    method: "POST",
+    headers: ghHeaders(),
+    body: JSON.stringify({
+      ref: "refs/heads/" + STATE_BRANCH,
+      sha: head.object.sha,
+    }),
+  });
+}
+
+async function loadStateFromGithub() {
+  if (!GITHUB_TOKEN || !GITHUB_REPO) return false;
+  try {
+    const res = await fetch(
+      "https://api.github.com/repos/" +
+        GITHUB_REPO +
+        "/contents/" +
+        STATE_PATH +
+        "?ref=" +
+        STATE_BRANCH,
+      { headers: ghHeaders() },
+    );
+    if (!res.ok) return false;
+    const data = await res.json();
+    const parsed = JSON.parse(
+      Buffer.from(data.content, "base64").toString("utf8"),
+    );
+    if (Array.isArray(parsed) && parsed.length) {
+      state = parsed;
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+      fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+      console.log("restored", state.length, "plugins from GitHub state branch");
+      return true;
+    }
+  } catch (e) {
+    console.warn("github state load failed:", e.message);
+  }
+  return false;
+}
+
+async function syncStateToGithub() {
+  if (!GITHUB_TOKEN || !GITHUB_REPO) return;
+  try {
+    await ensureStateBranch();
+    const content = Buffer.from(JSON.stringify(state, null, 2)).toString(
+      "base64",
+    );
+    const cur = await fetch(
+      "https://api.github.com/repos/" +
+        GITHUB_REPO +
+        "/contents/" +
+        STATE_PATH +
+        "?ref=" +
+        STATE_BRANCH,
+      { headers: ghHeaders() },
+    );
+    const sha = cur.ok ? (await cur.json()).sha : undefined;
+    const res = await fetch(
+      "https://api.github.com/repos/" + GITHUB_REPO + "/contents/" + STATE_PATH,
+      {
+        method: "PUT",
+        headers: ghHeaders(),
+        body: JSON.stringify({
+          message: "sync plugin state",
+          content,
+          sha,
+          branch: STATE_BRANCH,
+        }),
+      },
+    );
+    if (!res.ok) console.warn("github sync failed:", res.status);
+  } catch (e) {
+    console.warn("github sync failed:", e.message);
+  }
+}
 
 function loadState() {
   try {
     state = JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
     if (!Array.isArray(state)) state = [];
-    return;
+    if (state.length) return;
   } catch (e) {
     state = [];
   }
-  try {
-    const txt = fs.readFileSync(path.join(ROOT, "plugins.txt"), "utf8");
-    const seen = new Set();
-    for (const url of txt
-      .split("\n")
-      .map((s) => s.trim())
-      .filter(Boolean)) {
-      const name = pluginNameFromUrl(url) || "plugin";
-      let id = slugify(name);
-      let n = 2;
-      while (seen.has(id)) id = slugify(name) + "-" + n++;
-      seen.add(id);
-      state.push({ id, name, url, addedAt: Date.now() });
+  // local state missing/empty → GitHub mirror, then legacy plugins.txt
+  loadStateFromGithub().then((ok) => {
+    if (ok) return;
+    try {
+      const txt = fs.readFileSync(path.join(ROOT, "plugins.txt"), "utf8");
+      const seen = new Set();
+      for (const url of txt
+        .split("\n")
+        .map((s) => s.trim())
+        .filter(Boolean)) {
+        const name = pluginNameFromUrl(url) || "plugin";
+        let id = slugify(name);
+        let n = 2;
+        while (seen.has(id)) id = slugify(name) + "-" + n++;
+        seen.add(id);
+        state.push({ id, name, url, addedAt: Date.now() });
+      }
+      if (state.length) {
+        saveState();
+        console.log("migrated", state.length, "plugins from plugins.txt");
+      }
+    } catch (e) {
+      // no plugins.txt — fresh start, dashboard is the manager
     }
-    if (state.length) {
-      saveState();
-      console.log("migrated", state.length, "plugins from plugins.txt");
-    }
-  } catch (e) {
-    // no plugins.txt — fresh start, dashboard is the manager
-  }
+  });
 }
 
 function saveState() {
   fs.mkdirSync(DATA_DIR, { recursive: true });
   fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+  syncStateToGithub(); // fire-and-forget; local state is already durable
 }
 
 // ---------- plugin registry ----------

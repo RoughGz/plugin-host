@@ -1,7 +1,8 @@
 {
 	"id": "com.stremio.pluginhost",
 	"name": "Plugin Host",
-	"description": "Skystream plugin host — add any plugin by pasting its plugin.js URL.",
+	"description": "Skystream plugin host \u2014 add any plugin by pasting its plugin.js URL.",
 	"logo": "https://raw.githubusercontent.com/RougheHz/plugin-host/main/lib/logoo.png",
-	"publicUrl": ""
+	"publicUrl": "",
+	"githubRepo": "RougheHz/plugin-host"
 }

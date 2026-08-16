@@ -490,6 +490,12 @@ body {
   .add-form .btn {
     width: 100%;
   }
+  .add-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 10px;
+  }
+
   .grid {
     grid-template-columns: 1fr;
   }

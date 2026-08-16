@@ -12,6 +12,8 @@
   const addError = $("#addError");
   const toasts = $("#toasts");
   const installAll = $("#installAll");
+  const installRoot = $("#installRoot");
+  const copyManifest = $("#copyManifest");
 
   function api(path, opts = {}) {
     return fetch(path, opts);
@@ -179,6 +181,16 @@
 
   installAll.addEventListener("click", () => {
     window.open(stremioInstallUrl(location.origin + "/manifest.json"), "_self");
+  });
+
+  installRoot.addEventListener("click", () => {
+    window.open(stremioInstallUrl(location.origin + "/manifest.json"), "_self");
+  });
+
+  copyManifest.addEventListener("click", () => {
+    copyText(location.origin + "/manifest.json").then(() =>
+      toast("Manifest URL copied"),
+    );
   });
 
   load().catch((e) => {

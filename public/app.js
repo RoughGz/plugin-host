@@ -275,6 +275,113 @@
     if (url) addPlugin(url);
   });
 
+  // ---- repository browser ----
+  const repoForm = $("#repoForm");
+  const repoUrlInput = $("#repoUrlInput");
+  const repoBtn = $("#repoBtn");
+  const repoError = $("#repoError");
+  const repoResult = $("#repoResult");
+  const repoName = $("#repoName");
+  const repoDesc = $("#repoDesc");
+  const repoPlugins = $("#repoPlugins");
+  const repoAddSelected = $("#repoAddSelected");
+  let repoPluginList = [];
+
+  async function loadRepo(url) {
+    repoBtn.disabled = true;
+    repoBtn.querySelector(".btn-label").hidden = true;
+    repoBtn.querySelector(".spinner").hidden = false;
+    repoError.hidden = true;
+    repoResult.hidden = true;
+    try {
+      const res = await api("api/repos", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "HTTP " + res.status);
+      repoPluginList = data.plugins || [];
+      repoName.textContent = data.name;
+      repoDesc.textContent = data.description || "";
+      repoPlugins.innerHTML = "";
+      for (const p of repoPluginList) {
+        const row = document.createElement("label");
+        row.className = "repo-plugin";
+        row.innerHTML =
+          '<input type="checkbox" class="repo-check" data-repo="' +
+          p.url.replace(/"/g, "&quot;") +
+          '">' +
+          '<div><div class="rp-name">' +
+          esc(p.name) +
+          "</div>" +
+          (p.description
+            ? '<div class="rp-desc">' + esc(p.description) + "</div>"
+            : "") +
+          (p.categories.length
+            ? '<div class="rp-cats">' +
+              p.categories
+                .map((c) => "<span>" + esc(c) + "</span>")
+                .join("") +
+              "</div>"
+            : "") +
+          "</div>";
+        repoPlugins.appendChild(row);
+      }
+      repoResult.hidden = false;
+      updateRepoAddBtn();
+    } catch (e) {
+      repoError.textContent = e.message;
+      repoError.hidden = false;
+    } finally {
+      repoBtn.disabled = false;
+      repoBtn.querySelector(".btn-label").hidden = false;
+      repoBtn.querySelector(".spinner").hidden = true;
+    }
+  }
+
+  function updateRepoAddBtn() {
+    const any = repoPlugins.querySelector(".repo-check:checked");
+    repoAddSelected.disabled = !any;
+  }
+
+  repoForm.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const url = repoUrlInput.value.trim();
+    if (url) loadRepo(url);
+  });
+
+  repoPlugins.addEventListener("change", updateRepoAddBtn);
+
+  repoAddSelected.addEventListener("click", async () => {
+    const urls = [...repoPlugins.querySelectorAll(".repo-check:checked")].map(
+      (cb) => cb.dataset.repo,
+    );
+    if (!urls.length) return;
+    repoAddSelected.disabled = true;
+    const names = new Map(repoPluginList.map((p) => [p.url, p.name]));
+    let ok = 0;
+    const errors = [];
+    for (const url of urls) {
+      try {
+        const res = await api("api/plugins", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url, name: names.get(url) || "" }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || "HTTP " + res.status);
+        ok++;
+      } catch (e) {
+        errors.push(names.get(url) || url + ": " + e.message);
+      }
+    }
+    if (ok) toast("Added " + ok + " plugin" + (ok > 1 ? "s" : ""));
+    if (errors.length) toast("Failed: " + errors.join(" | "), "error");
+    repoAddSelected.disabled = false;
+    await load();
+  });
+
   grid.addEventListener("click", (e) => {
     const copyBtn = e.target.closest("[data-copy]");
     if (copyBtn) {

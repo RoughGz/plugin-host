@@ -97,6 +97,43 @@
         </div>
       </section>
 
+      <section class="add-card">
+        <div class="add-card-head">
+          <h2>Add a repository</h2>
+          <p>
+            Paste a SkyStream repo.json URL to browse all plugins in it, then
+            pick the ones you want.
+          </p>
+        </div>
+        <form id="repoForm" class="add-form">
+          <input
+            id="repoUrlInput"
+            type="url"
+            spellcheck="false"
+            autocomplete="off"
+            placeholder="https://raw.githubusercontent.com/user/repo/main/repo.json"
+            required
+          />
+          <button type="submit" class="btn btn-primary" id="repoBtn">
+            <span class="btn-label">Load repo</span>
+            <span class="spinner" hidden></span>
+          </button>
+        </form>
+        <div id="repoError" class="alert alert-error" hidden></div>
+        <div id="repoResult" hidden>
+          <div class="repo-head">
+            <strong id="repoName"></strong>
+            <span id="repoDesc" class="muted"></span>
+          </div>
+          <div id="repoPlugins" class="repo-plugins"></div>
+          <div class="add-actions">
+            <button id="repoAddSelected" class="btn btn-primary" disabled>
+              Add selected
+            </button>
+          </div>
+        </div>
+      </section>
+
       <section class="plugins-section">
         <div class="section-head">
           <h2>Your plugins</h2>

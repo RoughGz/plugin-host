@@ -254,6 +254,62 @@ body {
   color: #fca5a5;
 }
 
+/* ---------- repo browser ---------- */
+.repo-head {
+  margin-top: 14px;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.repo-head .muted {
+  color: #94a3b8;
+  font-size: 13px;
+}
+.repo-plugins {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.repo-plugin {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 10px;
+  background: rgba(148, 163, 184, 0.06);
+}
+.repo-plugin input {
+  margin-top: 3px;
+  accent-color: #6366f1;
+}
+.repo-plugin .rp-name {
+  font-weight: 600;
+  font-size: 14px;
+}
+.repo-plugin .rp-desc {
+  color: #94a3b8;
+  font-size: 12.5px;
+  margin-top: 2px;
+}
+.repo-plugin .rp-cats {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+  flex-wrap: wrap;
+}
+.repo-plugin .rp-cats span {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(99, 102, 241, 0.15);
+  color: #a5b4fc;
+}
+
 /* ---------- plugins section ---------- */
 .section-head {
   display: flex;

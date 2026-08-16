@@ -5,7 +5,12 @@ const dns = require("node:dns").promises;
 const crypto = require("node:crypto");
 const { Readable } = require("node:stream");
 const { PluginRuntime, callPlugin } = require("./lib/plugin-host");
-const { pluginNameFromUrl, fetchPluginSource } = require("./lib/plugin-url");
+const {
+  pluginNameFromUrl,
+  fetchPluginSource,
+  fetchPluginSourceFromSky,
+  fetchRepoPlugins,
+} = require("./lib/plugin-url");
 
 const ROOT = __dirname;
 const PLUGINS_DIR = path.join(ROOT, "plugins");
@@ -764,7 +769,12 @@ async function handleAddPlugin(req, res) {
     return sendJson(res, 409, { error: "plugin already added" });
   let source;
   try {
-    source = await fetchPluginSource(url);
+    source = url.endsWith(".sky")
+      ? await fetchPluginSourceFromSky(
+          url,
+          typeof body.name === "string" ? body.name : "",
+        )
+      : await fetchPluginSource(url);
   } catch (e) {
     return sendJson(res, 400, { error: e.message });
   }
@@ -782,6 +792,24 @@ async function handleAddPlugin(req, res) {
   rebuildPrefixMap(globalPool);
   console.log("added plugin:", id, "<-", url);
   sendJson(res, 201, { plugin: publicPlugin(state[state.length - 1], req) });
+}
+
+// POST /api/repos {url} — fetch a SkyStream repo.json and list its plugins
+// (does NOT install anything; the client picks what to add)
+async function handleListRepo(req, res) {
+  let body;
+  try {
+    body = JSON.parse(await readBody(req, 16384));
+  } catch (e) {
+    return sendJson(res, 400, { error: "bad json body" });
+  }
+  const url = body && typeof body.url === "string" ? body.url.trim() : "";
+  if (!url) return sendJson(res, 400, { error: "missing url" });
+  try {
+    sendJson(res, 200, await fetchRepoPlugins(url));
+  } catch (e) {
+    sendJson(res, 400, { error: e.message });
+  }
 }
 
 // DELETE /api/plugins/:id — stop the runtime, drop the files, forget it
@@ -1136,6 +1164,8 @@ const server = http.createServer(async (req, res) => {
       return handleListPlugins(req, res);
     if (url === "/api/plugins" && req.method === "POST")
       return handleAddPlugin(req, res);
+    if (url === "/api/repos" && req.method === "POST")
+      return handleListRepo(req, res);
     const delM = /^\/api\/plugins\/([A-Za-z0-9_-]+)$/.exec(url);
     if (delM && req.method === "DELETE")
       return handleDeletePlugin(req, res, delM[1]);

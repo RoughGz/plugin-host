@@ -26,11 +26,9 @@ try {
 }
 
 // ---------- state: data/plugins.json ----------
-// App-managed runtime state (NOT a static config file — the dashboard is the
-// only way to change it). One-time migration from the old plugins.txt.
-// Render's free tier wipes the filesystem on redeploy AND idle spin-down, so
-// when GITHUB_TOKEN is set the state is also mirrored to the repo's `state`
-// branch and restored from there at boot — plugins survive redeploys.
+// Dashboard-managed runtime state. When GITHUB_TOKEN is set it's mirrored to
+// the repo's `state` branch and restored at boot — Render free tier wipes the
+// filesystem on redeploy and idle spin-down.
 let state = []; // [{id, name, url, addedAt}]
 
 const GITHUB_REPO = process.env.GITHUB_REPO || config.githubRepo || "";
@@ -149,7 +147,7 @@ async function syncStateToGithub() {
   }
 }
 
-function loadState() {
+async function loadState() {
   try {
     state = JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
     if (!Array.isArray(state)) state = [];
@@ -157,31 +155,29 @@ function loadState() {
   } catch (e) {
     state = [];
   }
-  // local state missing/empty → GitHub mirror, then legacy plugins.txt
-  loadStateFromGithub().then((ok) => {
-    if (ok) return;
-    try {
-      const txt = fs.readFileSync(path.join(ROOT, "plugins.txt"), "utf8");
-      const seen = new Set();
-      for (const url of txt
-        .split("\n")
-        .map((s) => s.trim())
-        .filter(Boolean)) {
-        const name = pluginNameFromUrl(url) || "plugin";
-        let id = slugify(name);
-        let n = 2;
-        while (seen.has(id)) id = slugify(name) + "-" + n++;
-        seen.add(id);
-        state.push({ id, name, url, addedAt: Date.now() });
-      }
-      if (state.length) {
-        saveState();
-        console.log("migrated", state.length, "plugins from plugins.txt");
-      }
-    } catch (e) {
-      // no plugins.txt — fresh start, dashboard is the manager
+  // disk wiped → GitHub mirror, then legacy plugins.txt
+  if (await loadStateFromGithub()) return;
+  try {
+    const txt = fs.readFileSync(path.join(ROOT, "plugins.txt"), "utf8");
+    const seen = new Set();
+    for (const url of txt
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean)) {
+      const name = pluginNameFromUrl(url) || "plugin";
+      let id = slugify(name);
+      let n = 2;
+      while (seen.has(id)) id = slugify(name) + "-" + n++;
+      seen.add(id);
+      state.push({ id, name, url, addedAt: Date.now() });
     }
-  });
+    if (state.length) {
+      saveState();
+      console.log("migrated", state.length, "plugins from plugins.txt");
+    }
+  } catch (e) {
+    // no plugins.txt — fresh start, dashboard is the manager
+  }
 }
 
 function saveState() {
@@ -390,8 +386,8 @@ function filenameFromUrl(u) {
 
 // ---------- plugin loading ----------
 
-// Load every state entry (fetch source, install to plugins/<id>/, spawn
-// runtime) plus any dev/test plugin dirs dropped into plugins/ by hand.
+// Load state entries (fetch source, install, spawn runtime) plus any
+// dev/test plugin dirs dropped into plugins/ by hand.
 async function loadFromState() {
   for (const p of plugins.values()) if (p.runtime) p.runtime.destroy();
   plugins.clear();
@@ -488,8 +484,7 @@ async function warmPlugin(plugin, pool) {
       built.set(slugify(name), { name, type: firstType, items });
     }
     if (!built.size) {
-      // upstream returned no sections (blocked/flaky API, or a JSON error
-      // page that parses) — keep existing catalogs, stale beats empty
+      // no sections (flaky/blocked upstream) — keep existing catalogs, stale beats empty
       plugin.sectionsTs = Date.now();
       plugin.status = "error";
       plugin.error = "getHome returned no sections";
@@ -674,8 +669,7 @@ function handleListPlugins(req, res) {
   sendJson(res, 200, { plugins: state.map((e) => publicPlugin(e, req)) });
 }
 
-// POST /api/plugins {url} — fetch + validate the plugin, install it, and hand
-// back its unique addon URL. No config files involved.
+// POST /api/plugins {url} — fetch + install a plugin, return its addon URL
 async function handleAddPlugin(req, res) {
   let body;
   try {
@@ -695,7 +689,7 @@ async function handleAddPlugin(req, res) {
   }
   const id = uniqueId(slugify(source.name));
   const plugin = makePlugin(id, source.name, source.code, source.descriptor);
-  const pool = { plugins: new Map([[id, plugin]]), prefixMap: new Map() };
+  const pool = poolFor(plugin);
   await warmPlugin(plugin, pool);
   if (!plugin.sections.size) {
     plugin.runtime.destroy();
@@ -730,9 +724,7 @@ function handleDeletePlugin(req, res, id) {
 // ---------- addon handlers ----------
 
 function manifest(pool, req) {
-  // self-heal: if a plugin has no catalogs and hasn't been warmed recently,
-  // kick a background warm so the next fetch shows them (Render free tier
-  // spins down when idle; the boot warm can hit a transient failure)
+  // self-heal: stale empty catalogs kick a background warm (Render idle spin-down)
   for (const p of pool.plugins.values()) {
     if (!p.sections.size && Date.now() - p.sectionsTs > CACHE_TTL_MS) {
       warmAll().catch(() => {});
@@ -1144,12 +1136,10 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-// hot reload: any change under plugins/ → reload + re-warm (dev/test only).
-// Serialized; events during boot are ignored (boot loads everything itself).
-// Writes made by the management API are skipped (they manage state directly).
-// Disabled in production: on Render the only writes come from the management
-// API, and a reload re-warms every plugin — a flaky upstream then wipes the
-// catalogs the add flow just built.
+// hot reload (dev/test only): reload + re-warm on plugin/ changes. Writes by
+// the management API set lastSelfWrite and are skipped. Off in production —
+// there the API is the only writer, and a reload re-warms every plugin, so a
+// flaky upstream would wipe the catalogs the add flow just built.
 let booting = true;
 let lastSelfWrite = 0;
 let reloadTimer = null;
@@ -1171,7 +1161,7 @@ if (process.env.NODE_ENV !== "production")
   fs.watch(PLUGINS_DIR, { recursive: true }, () => reloadNow());
 
 async function boot() {
-  loadState();
+  await loadState();
   await loadFromState();
   await warmAll();
   booting = false;

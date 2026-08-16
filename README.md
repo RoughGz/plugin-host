@@ -17,15 +17,9 @@ automatically respawned.
 
 ## Manage plugins from the dashboard (no config files)
 
-The management dashboard lives on an **unguessable URL** — the server logs it at
-boot:
-
-```
-management dashboard: http://your-host.onrender.com/mgmt-<random-hex>/
-```
-
-Paste a GitHub plugin URL → the plugin is fetched, validated, and goes live
-instantly with **its own unique addon URL**:
+The web page (`/`) is the plugin manager — public by design, anyone can add
+plugins. Paste a GitHub plugin URL → the plugin is fetched, validated, and goes
+live instantly with **its own unique addon URL**:
 
 ```
 https://your-host.onrender.com/<plugin-id>/manifest.json

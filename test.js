@@ -252,22 +252,14 @@ async function main() {
     45000,
     "server boot",
   );
-  // management dashboard lives on an unguessable /mgmt-<random>/ path
-  const mgmt = (serverOut.match(
-    /management dashboard: http:\/\/localhost:\d+(\/mgmt-[a-f0-9]+)\//,
-  ) || [])[1];
-  if (!started || !mgmt) {
+  if (!started) {
     server.kill();
     fs.rmSync(testDir, { recursive: true, force: true });
     fs.rmSync(hangDir, { recursive: true, force: true });
     fs.rmSync(path.join(__dirname, "plugins.txt"), { force: true });
     if (stateBackup === null) fs.rmSync(statePath, { force: true });
     else fs.writeFileSync(statePath, stateBackup);
-    console.error(
-      "server failed to boot (port " +
-        PORT +
-        " in use?) or mgmt path not logged",
-    );
+    console.error("server failed to boot (port " + PORT + " in use?)");
     process.exit(1);
   }
 
@@ -496,7 +488,7 @@ async function main() {
     // the plugin goes live with its own unique addon URL; DELETE removes it.
     console.log("dashboard API flow:");
     try {
-      const addRes = await fetch(base + mgmt + "/api/plugins", {
+      const addRes = await fetch(base + "/api/plugins", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -521,7 +513,7 @@ async function main() {
           JSON.stringify(m.catalogs).slice(0, 200),
         );
         // duplicate add → 409
-        const dup = await fetch(base + mgmt + "/api/plugins", {
+        const dup = await fetch(base + "/api/plugins", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -530,13 +522,13 @@ async function main() {
         });
         check("duplicate add rejected", dup.status === 409);
         // list includes it
-        const list = await getJson(base + mgmt + "/api/plugins");
+        const list = await getJson(base + "/api/plugins");
         check(
           "list includes plugin",
           list.plugins.some((p) => p.id === pid),
         );
         // remove via API → gone from the all-plugins manifest
-        const del = await fetch(base + mgmt + "/api/plugins/" + pid, {
+        const del = await fetch(base + "/api/plugins/" + pid, {
           method: "DELETE",
         });
         check("plugin removed via API", del.status === 200);

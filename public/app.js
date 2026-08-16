@@ -272,14 +272,14 @@
   addForm.addEventListener("submit", (e) => {
     e.preventDefault();
     const url = urlInput.value.trim();
-    if (url) addPlugin(url);
+    if (!url) return;
+    // repo.json URL -> browse the repository; anything else -> install
+    if (/\/repo\.json$/i.test(url)) loadRepo(url);
+    else addPlugin(url);
   });
 
-  // ---- repository browser ----
-  const repoForm = $("#repoForm");
-  const repoUrlInput = $("#repoUrlInput");
-  const repoBtn = $("#repoBtn");
-  const repoError = $("#repoError");
+  // ---- repository browser (inline in the add card) ----
+  const repoError = $("#addError");
   const repoResult = $("#repoResult");
   const repoName = $("#repoName");
   const repoDesc = $("#repoDesc");
@@ -288,9 +288,9 @@
   let repoPluginList = [];
 
   async function loadRepo(url) {
-    repoBtn.disabled = true;
-    repoBtn.querySelector(".btn-label").hidden = true;
-    repoBtn.querySelector(".spinner").hidden = false;
+    addBtn.disabled = true;
+    addBtn.querySelector(".btn-label").hidden = true;
+    addBtn.querySelector(".spinner").hidden = false;
     repoError.hidden = true;
     repoResult.hidden = true;
     try {
@@ -320,9 +320,7 @@
             : "") +
           (p.categories.length
             ? '<div class="rp-cats">' +
-              p.categories
-                .map((c) => "<span>" + esc(c) + "</span>")
-                .join("") +
+              p.categories.map((c) => "<span>" + esc(c) + "</span>").join("") +
               "</div>"
             : "") +
           "</div>";
@@ -334,9 +332,9 @@
       repoError.textContent = e.message;
       repoError.hidden = false;
     } finally {
-      repoBtn.disabled = false;
-      repoBtn.querySelector(".btn-label").hidden = false;
-      repoBtn.querySelector(".spinner").hidden = true;
+      addBtn.disabled = false;
+      addBtn.querySelector(".btn-label").hidden = false;
+      addBtn.querySelector(".spinner").hidden = true;
     }
   }
 
@@ -344,12 +342,6 @@
     const any = repoPlugins.querySelector(".repo-check:checked");
     repoAddSelected.disabled = !any;
   }
-
-  repoForm.addEventListener("submit", (e) => {
-    e.preventDefault();
-    const url = repoUrlInput.value.trim();
-    if (url) loadRepo(url);
-  });
 
   repoPlugins.addEventListener("change", updateRepoAddBtn);
 

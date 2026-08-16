@@ -245,10 +245,19 @@ function uniqueId(base) {
 
 const TYPE_MAP = {
   movie: "movie",
+  movies: "movie",
   series: "series",
+  tv: "series",
   tvseries: "series",
+  tvshow: "series",
+  tvshows: "series",
+  show: "series",
   anime: "series",
+  animes: "series",
   livestream: "series",
+  livetv: "series",
+  iptv: "series",
+  live: "series",
   other: "movie",
 };
 function mapType(t) {
@@ -295,26 +304,35 @@ function mapCast(item) {
     .filter((c) => c.name);
 }
 
+// normalize an episode's season/episode numbers the same way everywhere
+// (plugins leave them 0/undefined or as strings; the reference app defaults
+// season 0 -> 1 and numbers episodes from 1)
+function epNumbers(ep, i) {
+  return {
+    season: Number(ep.season) || 1,
+    episode: Number(ep.episode) || i + 1,
+  };
+}
+
 function mapMeta(item) {
   const type = mapType(item.type);
   const episodes = Array.isArray(item.episodes) ? item.episodes : [];
-  // movies: no videos — Stremio shows one Play button and requests
-  // /stream/movie/<id>. A fake "S1 E1" episode makes movies render as seasons
-  const videos =
-    type === "series"
-      ? episodes.map((ep, i) => ({
-          id:
-            ep.season != null && ep.episode != null && (ep.season || ep.episode)
-              ? "e" + (ep.season || 0) + "x" + (ep.episode || 0)
-              : "e" + i,
-          title: ep.name || "Episode " + (ep.episode || i + 1),
-          season: ep.season || 1,
-          episode: ep.episode || i + 1,
-          released: ep.airDate,
-          thumbnail: ep.posterUrl,
-          overview: ep.description,
-        }))
-      : [];
+  // build videos whenever the plugin provides episodes — SkyStream encodes
+  // movies as a single "Play Movie" episode (season 1, episode 1), and series
+  // plugins may label their type "tv"/"show"/"anime"/... or leave it unset
+  // (defaults to "movie"), so type alone must not gate episode rendering
+  const videos = episodes.map((ep, i) => {
+    const n = epNumbers(ep, i);
+    return {
+      id: "e" + n.season + "x" + n.episode,
+      title: ep.name || "Episode " + n.episode,
+      season: n.season,
+      episode: n.episode,
+      released: ep.airDate,
+      thumbnail: ep.posterUrl,
+      overview: ep.description,
+    };
+  });
   return {
     id: item.url,
     type,
@@ -909,10 +927,12 @@ async function resolveStreams(plugin, metaId, season, episode) {
   if (season !== null) {
     const item = await getRawItem(plugin, metaId);
     if (item && Array.isArray(item.episodes)) {
-      const ep = item.episodes.find(
-        (e) => e.season === season && e.episode === episode,
-      );
-      if (ep) {
+      const idx = item.episodes.findIndex((e, i) => {
+        const n = epNumbers(e, i);
+        return n.season === season && n.episode === episode;
+      });
+      if (idx >= 0) {
+        const ep = item.episodes[idx];
         const r = await callPlugin(plugin.runtime, "loadStreams", [
           ep.url || metaId,
         ]);

@@ -40,10 +40,11 @@
     <main class="container">
       <section class="add-card">
         <div class="add-card-head">
-          <h2>Add a plugin</h2>
+          <h2>Add a plugin or repository</h2>
           <p>
-            Paste a GitHub plugin URL — it goes live instantly with its own
-            unique addon link.
+            Paste a plugin URL (GitHub folder, plugin.js, or .sky bundle) to
+            install it — or a repo.json URL to browse and pick from a whole
+            repository.
           </p>
         </div>
         <form id="addForm" class="add-form">
@@ -52,15 +53,27 @@
             type="url"
             spellcheck="false"
             autocomplete="off"
-            placeholder="https://github.com/user/repo/tree/main/plugin-folder"
+            placeholder="https://github.com/user/repo/tree/main/plugin-folder  or  .../repo.json"
             required
           />
           <button type="submit" class="btn btn-primary" id="addBtn">
-            <span class="btn-label">Add plugin</span>
+            <span class="btn-label">Add</span>
             <span class="spinner" hidden></span>
           </button>
         </form>
         <div id="addError" class="alert alert-error" hidden></div>
+        <div id="repoResult" hidden>
+          <div class="repo-head">
+            <strong id="repoName"></strong>
+            <span id="repoDesc" class="muted"></span>
+          </div>
+          <div id="repoPlugins" class="repo-plugins"></div>
+          <div class="add-actions">
+            <button id="repoAddSelected" class="btn btn-primary" disabled>
+              Add selected
+            </button>
+          </div>
+        </div>
         <div class="add-actions">
           <button id="installRoot" class="btn btn-primary">
             <svg
@@ -94,43 +107,6 @@
             </svg>
             Copy manifest URL
           </button>
-        </div>
-      </section>
-
-      <section class="add-card">
-        <div class="add-card-head">
-          <h2>Add a repository</h2>
-          <p>
-            Paste a SkyStream repo.json URL to browse all plugins in it, then
-            pick the ones you want.
-          </p>
-        </div>
-        <form id="repoForm" class="add-form">
-          <input
-            id="repoUrlInput"
-            type="url"
-            spellcheck="false"
-            autocomplete="off"
-            placeholder="https://raw.githubusercontent.com/user/repo/main/repo.json"
-            required
-          />
-          <button type="submit" class="btn btn-primary" id="repoBtn">
-            <span class="btn-label">Load repo</span>
-            <span class="spinner" hidden></span>
-          </button>
-        </form>
-        <div id="repoError" class="alert alert-error" hidden></div>
-        <div id="repoResult" hidden>
-          <div class="repo-head">
-            <strong id="repoName"></strong>
-            <span id="repoDesc" class="muted"></span>
-          </div>
-          <div id="repoPlugins" class="repo-plugins"></div>
-          <div class="add-actions">
-            <button id="repoAddSelected" class="btn btn-primary" disabled>
-              Add selected
-            </button>
-          </div>
         </div>
       </section>
 

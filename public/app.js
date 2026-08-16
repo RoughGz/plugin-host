@@ -14,8 +14,6 @@
   const addBtn = $("#addBtn");
   const addError = $("#addError");
   const toasts = $("#toasts");
-  const installRoot = $("#installRoot");
-  const copyManifest = $("#copyManifest");
   const selBar = $("#selBar");
   const selCount = $("#selCount");
   const makeBundle = $("#makeBundle");
@@ -415,16 +413,6 @@
   );
   bundleResultClose.addEventListener("click", () => {
     bundleResult.hidden = true;
-  });
-
-  installRoot.addEventListener("click", () => {
-    window.open(stremioInstallUrl(location.origin + "/manifest.json"), "_self");
-  });
-
-  copyManifest.addEventListener("click", () => {
-    copyText(location.origin + "/manifest.json").then(() =>
-      toast("Manifest URL copied"),
-    );
   });
 
   // keep statuses fresh (a plugin can recover or error at any time)

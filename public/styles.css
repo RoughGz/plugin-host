@@ -23,6 +23,19 @@
 
 html {
   -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+/* Kill double-tap zoom on touch devices for everything interactive */
+.btn,
+.icon-btn,
+input,
+label,
+a,
+.chip,
+.card-check,
+.repo-check {
+  touch-action: manipulation;
 }
 
 body {
@@ -89,7 +102,8 @@ body {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  padding: 10px 18px;
+  padding: 12px 18px;
+  min-height: 44px;
   border-radius: 10px;
   border: 1px solid transparent;
   font-size: 14px;
@@ -132,7 +146,8 @@ body {
 }
 
 .btn-sm {
-  padding: 7px 12px;
+  padding: 8px 14px;
+  min-height: 38px;
   font-size: 13px;
   border-radius: 8px;
 }
@@ -141,8 +156,8 @@ body {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 30px;
-  height: 30px;
+  width: 38px;
+  height: 38px;
   border-radius: 8px;
   border: none;
   background: transparent;
@@ -210,12 +225,13 @@ body {
 }
 .add-form input {
   flex: 1;
-  padding: 11px 14px;
+  padding: 12px 14px;
   border-radius: 10px;
   border: 1px solid var(--border);
   background: var(--bg-soft);
   color: var(--text);
-  font-size: 14px;
+  /* 16px: iOS Safari zooms into any input with a smaller font-size */
+  font-size: 16px;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   transition:
     border-color 0.12s ease,
@@ -357,6 +373,7 @@ body {
 .grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  grid-auto-rows: 1fr;
   gap: 18px;
 }
 
@@ -369,6 +386,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 14px;
+  height: 100%;
   transition:
     transform 0.15s ease,
     border-color 0.15s ease,
@@ -415,8 +433,8 @@ body {
 }
 
 .card-check {
-  width: 16px;
-  height: 16px;
+  width: 18px;
+  height: 18px;
   accent-color: var(--accent);
   cursor: pointer;
   flex-shrink: 0;
@@ -639,15 +657,62 @@ body {
   .add-form .btn {
     width: 100%;
   }
+  .add-form input {
+    font-size: 16px;
+  }
 
   .grid {
     grid-template-columns: 1fr;
   }
+
+  .add-actions {
+    flex-direction: column;
+  }
+  .add-actions .btn {
+    width: 100%;
+  }
+
+  .repo-plugin {
+    padding: 12px;
+  }
+  .repo-plugin input {
+    width: 20px;
+    height: 20px;
+    margin-top: 1px;
+  }
+
+  .url {
+    font-size: 12px;
+  }
+
+  .sel-bar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+  .sel-bar .btn {
+    width: 100%;
+  }
+
+  .card-actions {
+    flex-direction: column;
+  }
+  .card-actions .btn {
+    width: 100%;
+  }
+
+  .bundle-result-head {
+    align-items: flex-start;
+  }
+
   .toasts {
     left: 14px;
     right: 14px;
+    bottom: 14px;
   }
   .toast {
     max-width: none;
+    font-size: 14px;
+    padding: 13px 16px;
   }
 }

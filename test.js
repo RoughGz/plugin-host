@@ -356,7 +356,7 @@ async function main() {
     );
     check(
       "meta videos",
-      Array.isArray(meta.meta.videos) && meta.meta.videos.length === 0, // movies have no episodes
+      Array.isArray(meta.meta.videos) && meta.meta.videos.length === 1, // movie with episodes -> 1 video (S1E1)
     );
     const streams = await getJson(
       base +

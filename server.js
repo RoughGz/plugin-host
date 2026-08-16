@@ -553,14 +553,14 @@ function rebuildPrefixMap(pool) {
     if (p.descriptor.idPrefix)
       pool.prefixMap.set(
         String(p.descriptor.idPrefix).replace(/\/$/, ""),
-        p.name,
+        p.id,
       );
     for (const { items } of p.sections.values()) {
       for (const item of items) {
         if (!item.url || typeof item.url !== "string") continue;
         try {
           const origin = new URL(item.url).origin;
-          pool.prefixMap.set(origin, p.name);
+          pool.prefixMap.set(origin, p.id);
         } catch (e) {}
       }
     }

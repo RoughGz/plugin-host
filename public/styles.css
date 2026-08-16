@@ -476,57 +476,6 @@ body {
   }
 }
 
-/* ---------- modal ---------- */
-.modal-backdrop {
-  position: fixed;
-  inset: 0;
-  background: rgba(5, 7, 12, 0.7);
-  backdrop-filter: blur(4px);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 50;
-  padding: 20px;
-}
-.modal {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 26px;
-  width: 100%;
-  max-width: 400px;
-  box-shadow: var(--shadow);
-  animation: rise 0.2s ease both;
-}
-.modal h3 {
-  font-size: 17px;
-  margin-bottom: 6px;
-}
-.modal p {
-  color: var(--text-dim);
-  font-size: 13.5px;
-  margin-bottom: 16px;
-}
-.modal input {
-  width: 100%;
-  padding: 11px 14px;
-  border-radius: 10px;
-  border: 1px solid var(--border);
-  background: var(--bg-soft);
-  color: var(--text);
-  font-size: 14px;
-}
-.modal input:focus {
-  outline: none;
-  border-color: var(--accent);
-}
-.modal-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 10px;
-  margin-top: 16px;
-}
-
 /* ---------- responsive ---------- */
 @media (max-width: 640px) {
   .topbar {

@@ -57,22 +57,6 @@
           </svg>
           Install all
         </button>
-        <button id="lockBtn" class="btn btn-ghost" hidden>
-          <svg
-            viewBox="0 0 24 24"
-            width="16"
-            height="16"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          >
-            <rect x="4" y="11" width="16" height="10" rx="2" />
-            <path d="M8 11V7a4 4 0 018 0v4" />
-          </svg>
-          Unlock
-        </button>
       </div>
     </header>
 
@@ -139,37 +123,6 @@
     </footer>
 
     <div id="toasts" class="toasts" aria-live="polite"></div>
-
-    <div id="lockModal" class="modal-backdrop" hidden>
-      <div
-        class="modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="lockTitle"
-      >
-        <h3 id="lockTitle">Admin access required</h3>
-        <p>
-          This instance is protected by an admin token. Enter it to manage
-          plugins.
-        </p>
-        <form id="lockForm">
-          <input
-            id="lockInput"
-            type="password"
-            placeholder="Admin token"
-            autocomplete="off"
-            required
-          />
-          <div class="modal-actions">
-            <button type="button" class="btn btn-ghost" id="lockCancel">
-              Cancel
-            </button>
-            <button type="submit" class="btn btn-primary">Unlock</button>
-          </div>
-        </form>
-        <div id="lockError" class="alert alert-error" hidden></div>
-      </div>
-    </div>
 
     <script src="/app.js"></script>
   </body>

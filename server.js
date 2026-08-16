@@ -13,9 +13,6 @@ const STATE_FILE = path.join(DATA_DIR, "plugins.json");
 fs.mkdirSync(PLUGINS_DIR, { recursive: true }); // dev/test plugins; git ignores empty dirs
 fs.mkdirSync(DATA_DIR, { recursive: true });
 const PORT = process.env.PORT || 3999;
-// optional: set ADMIN_TOKEN to require it (x-admin-token header) for the
-// management API — plugins run arbitrary code, so gate who can add them
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";
 const CACHE_TTL_MS = 10 * 60 * 1000;
 const META_CACHE_MAX = 200;
 const DEFAULT_UA =
@@ -510,10 +507,6 @@ async function readBody(req, maxBytes) {
 
 // ---------- management API ----------
 
-function adminOk(req) {
-  return !ADMIN_TOKEN || req.headers["x-admin-token"] === ADMIN_TOKEN;
-}
-
 function publicPlugin(entry, req) {
   const p = plugins.get(entry.id);
   const out = {
@@ -904,7 +897,6 @@ const server = http.createServer(async (req, res) => {
 
     // ---- management API ----
     if (url.startsWith("/api/")) {
-      if (!adminOk(req)) return sendJson(res, 401, { error: "unauthorized" });
       if (url === "/api/plugins" && req.method === "GET")
         return handleListPlugins(req, res);
       if (url === "/api/plugins" && req.method === "POST")

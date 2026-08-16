@@ -13,9 +13,7 @@ automatically respawned.
 > on its own — a malicious plugin could escape it and reach the worker thread.
 > `--disallow-code-generation-from-strings` is set at runtime (blocks the
 > classic `Buffer.constructor("return process")()` escape, while plugin code and
-> in-sandbox `eval` still work). Only install plugins you trust. If the addon is
-> publicly reachable, set the `ADMIN_TOKEN` env var — the management API then
-> requires it (`x-admin-token` header; the dashboard asks for it once).
+> in-sandbox `eval` still work). Only install plugins you trust.
 
 ## Manage plugins from the dashboard (no config files)
 

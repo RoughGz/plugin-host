@@ -2,7 +2,6 @@
 (() => {
   "use strict";
 
-  const TOKEN_KEY = "pluginHostToken";
   const $ = (sel) => document.querySelector(sel);
   const grid = $("#grid");
   const empty = $("#empty");
@@ -12,19 +11,10 @@
   const addBtn = $("#addBtn");
   const addError = $("#addError");
   const toasts = $("#toasts");
-  const lockModal = $("#lockModal");
-  const lockForm = $("#lockForm");
-  const lockInput = $("#lockInput");
-  const lockError = $("#lockError");
-  const lockBtn = $("#lockBtn");
   const installAll = $("#installAll");
 
-  let token = localStorage.getItem(TOKEN_KEY) || "";
-
   function api(path, opts = {}) {
-    const headers = { ...(opts.headers || {}) };
-    if (token) headers["x-admin-token"] = token;
-    return fetch(path, { ...opts, headers });
+    return fetch(path, opts);
   }
 
   function toast(msg, kind = "ok") {
@@ -121,13 +111,6 @@
 
   async function load() {
     const res = await api("/api/plugins");
-    if (res.status === 401) {
-      lockBtn.hidden = false;
-      lockModal.hidden = false;
-      lockInput.focus();
-      return;
-    }
-    lockBtn.hidden = true;
     if (!res.ok) throw new Error("HTTP " + res.status);
     const data = await res.json();
     render(data.plugins || []);
@@ -145,12 +128,6 @@
         body: JSON.stringify({ url }),
       });
       const data = await res.json().catch(() => ({}));
-      if (res.status === 401) {
-        lockBtn.hidden = false;
-        lockModal.hidden = false;
-        lockInput.focus();
-        return;
-      }
       if (!res.ok) throw new Error(data.error || "HTTP " + res.status);
       urlInput.value = "";
       toast("Plugin added — " + data.plugin.name);
@@ -202,31 +179,6 @@
 
   installAll.addEventListener("click", () => {
     window.open(stremioInstallUrl(location.origin + "/manifest.json"), "_self");
-  });
-
-  lockForm.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    lockError.hidden = true;
-    token = lockInput.value.trim();
-    localStorage.setItem(TOKEN_KEY, token);
-    try {
-      await load();
-      lockModal.hidden = true;
-      lockBtn.hidden = true;
-      toast("Unlocked");
-    } catch (err) {
-      lockError.textContent = "Invalid token";
-      lockError.hidden = false;
-    }
-  });
-
-  $("#lockCancel").addEventListener("click", () => {
-    lockModal.hidden = true;
-  });
-
-  lockBtn.addEventListener("click", () => {
-    lockModal.hidden = false;
-    lockInput.focus();
   });
 
   load().catch((e) => {

@@ -706,6 +706,10 @@ function pluginForId(id, pool) {
 const probeCache = new Map(); // id -> { pluginId, ts } | { miss: true, ts }
 const PROBE_TIMEOUT_MS = 15000;
 const PROBE_NEGATIVE_TTL_MS = 60000;
+// a failed load() is often transient (Cloudflare challenge, upstream hiccup) —
+// negative-cache it briefly so the next tap retries instead of 404ing for the
+// full CACHE_TTL_MS
+const NEGATIVE_TTL_MS = 30000;
 const PROBE_CACHE_MAX = 500;
 
 function probeCachePut(id, value) {
@@ -745,29 +749,37 @@ async function probePluginForId(id, pool) {
   }
   const candidates = [...pool.plugins.values()].filter((p) => p.runtime);
   if (!candidates.length) return null;
-  // fallback: fire load(id) at all plugins; prefer the one whose result
-  // actually matches the id (url backfilled to id, or has episodes/streams)
-  const probeAll = (async () => {
-    const results = await Promise.allSettled(
-      candidates.map(async (p) => {
-        const res = await callPlugin(p.runtime, "load", [id]);
-        if (!res.success || !res.data || typeof res.data !== "object")
-          return null;
-        return { p, d: res.data };
-      }),
-    );
-    const hits = results
-      .filter((r) => r.status === "fulfilled" && r.value)
-      .map((r) => r.value);
-    if (!hits.length) return null;
-    const score = (h) =>
-      (h.d.url === id ? 4 : 0) +
-      (Array.isArray(h.d.episodes) && h.d.episodes.length ? 2 : 0) +
-      (Array.isArray(h.d.streams) && h.d.streams.length ? 2 : 0) +
-      (h.d.name && h.d.name !== "No Title" && h.d.name !== "Untitled" ? 1 : 0);
-    hits.sort((a, b) => score(b) - score(a));
-    return hits[0].p;
-  })();
+  // fallback: fire load(id) at all plugins; a strong match (the plugin's own
+  // item url equals the requested id) resolves immediately — a few slow or
+  // Cloudflare-blocked plugins must not block the whole probe until timeout
+  const score = (h) =>
+    (h.d.url === id ? 4 : 0) +
+    (Array.isArray(h.d.episodes) && h.d.episodes.length ? 2 : 0) +
+    (Array.isArray(h.d.streams) && h.d.streams.length ? 2 : 0) +
+    (h.d.name && h.d.name !== "No Title" && h.d.name !== "Untitled" ? 1 : 0);
+  const probeAll = new Promise((resolve) => {
+    const hits = [];
+    let settled = 0;
+    const finish = () => {
+      if (!hits.length) return resolve(null);
+      hits.sort((a, b) => score(b) - score(a));
+      resolve(hits[0].p);
+    };
+    for (const p of candidates) {
+      callPlugin(p.runtime, "load", [id])
+        .then((res) => {
+          if (res.success && res.data && typeof res.data === "object") {
+            const h = { p, d: res.data };
+            if (h.d.url === id) return resolve(p); // exact owner — done
+            hits.push(h);
+          }
+          if (++settled === candidates.length) finish();
+        })
+        .catch(() => {
+          if (++settled === candidates.length) finish();
+        });
+    }
+  });
   const winner = await Promise.race([
     probeAll,
     new Promise((res) => setTimeout(() => res(null), PROBE_TIMEOUT_MS)),
@@ -844,7 +856,7 @@ function poolFor(plugin) {
   return pool;
 }
 
-function cachePut(map, key, ts, value) {
+function cachePut(map, key, ts, value, ttl) {
   if (map.size >= META_CACHE_MAX) {
     let oldestKey = null,
       oldestTs = Infinity;
@@ -856,18 +868,20 @@ function cachePut(map, key, ts, value) {
     }
     if (oldestKey) map.delete(oldestKey);
   }
-  map.set(key, { ts, value });
+  map.set(key, { ts, value, ttl });
 }
 
 async function getRawItem(plugin, metaId) {
   if (!plugin.runtime) return null;
   const cached = plugin.metaCache.get(metaId);
-  if (cached && Date.now() - cached.ts < CACHE_TTL_MS) return cached.value;
+  const ttl = cached && cached.ttl ? cached.ttl : CACHE_TTL_MS;
+  if (cached && Date.now() - cached.ts < ttl) return cached.value;
   const res = await callPlugin(plugin.runtime, "load", [metaId]);
   if (!res.success || !res.data || typeof res.data !== "object") {
     // negative cache: a dead id must not re-trigger the full slow load on
-    // every stream/meta request
-    cachePut(plugin.metaCache, metaId, Date.now(), null);
+    // every stream/meta request — but keep it short so a transient upstream
+    // failure (Cloudflare challenge) recovers on the next tap
+    cachePut(plugin.metaCache, metaId, Date.now(), null, NEGATIVE_TTL_MS);
     return null;
   }
   // SkyStream parity: plugins may omit `url` in load() results — backfill it

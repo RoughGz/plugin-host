@@ -276,8 +276,13 @@ const QUALITY_MAP = {
 function itemName(item) {
   return item.title || item.name || item.url || "Untitled";
 }
+// Stremio web runs on https: an http image URL (tmdb etc.) is blocked as
+// mixed content -> blank posters. Upgrade to https; hosts like tmdb serve it.
+function httpsImg(s) {
+  return s ? String(s).replace(/^http:\/\//i, "https://") : s;
+}
 function itemPoster(item) {
-  return item.posterUrl || item.logoUrl || undefined;
+  return httpsImg(item.posterUrl || item.logoUrl) || undefined;
 }
 
 function mapItem(item) {
@@ -291,8 +296,8 @@ function mapItem(item) {
     type,
     name: itemName(item),
     poster: itemPoster(item),
-    background: item.bannerUrl || item.backgroundPosterUrl || "",
-    logo: item.logoUrl || "",
+    background: httpsImg(item.bannerUrl || item.backgroundPosterUrl) || "",
+    logo: httpsImg(item.logoUrl) || "",
     description: item.description || "",
     releaseInfo: item.year ? String(item.year) : "",
     imdbRating: item.score != null ? String(item.score) : "",
@@ -305,7 +310,7 @@ function mapCast(item) {
     .map((c) => ({
       name: c.name || c.actor,
       role: c.role || c.roleString,
-      image: c.image,
+      image: httpsImg(c.image),
     }))
     .filter((c) => c.name);
 }
@@ -361,7 +366,7 @@ function mapMeta(item) {
         title: ep.name || (isMovie ? "Play" : "Episode " + n.episode),
         ...(isMovie ? {} : { season: n.season, episode: n.episode }),
         released: normalizeReleased(ep.airDate),
-        thumbnail: ep.posterUrl,
+        thumbnail: httpsImg(ep.posterUrl),
         overview: ep.description,
       };
     })
@@ -387,10 +392,10 @@ function mapMeta(item) {
     description: item.description || "",
     releaseInfo: item.year ? String(item.year) : "",
     imdbRating: item.score != null ? String(item.score) : "",
-    // pass through the plugin's own imdb id when it has one; when absent,
-    // Stremio uses our meta as-is instead of merging Cinemeta (which would
-    // 404 for non-imdb ids and blank the detail page)
-    imdb_id: item.imdbId || item.imdb_id || undefined,
+    // never pass through imdb_id: stremio-core treats it as a link to Cinemeta
+    // and merges that response into the detail page — on clients without
+    // Cinemeta (or for ids Cinemeta 404s) the merge fails and the page goes
+    // blank. Our meta is complete; clients must render it as-is.
     genres: item.tags || [],
     cast: mapCast(item),
     videos,
@@ -863,6 +868,47 @@ function bundlePool(b) {
   return pool;
 }
 
+// stable id for a stateless bundle: same selection -> same id, forever
+function autoBundleId(urls) {
+  return crypto
+    .createHash("sha1")
+    .update(urls.join("\n"))
+    .digest("hex")
+    .slice(0, 8);
+}
+
+// shared dispatch for stateful (id-based) and stateless (url-encoded) bundles
+function serveBundleDispatch(req, res, pool, manifestId, rest, query) {
+  if (rest === "/manifest.json")
+    return sendJson(res, 200, manifest(pool, req, manifestId));
+  const proxyM = /^\/proxy\/(.+)$/.exec(rest);
+  if (proxyM) return handleProxy(req, res, proxyM[1]);
+  const catM = /^\/catalog\/(movie|series)\/([^/]+)(?:\/[^/]+)?\.json$/.exec(rest);
+  if (catM)
+    return handleCatalog(
+      req,
+      res,
+      catM[1],
+      decodeURIComponent(catM[2]),
+      (query || new URLSearchParams()).get("search"),
+      pool,
+    );
+  const metaM = /^\/meta\/(movie|series)\/([^/]+)\.json$/.exec(rest);
+  if (metaM)
+    return handleMeta(req, res, metaM[1], decodeURIComponent(metaM[2]), pool);
+  const streamM = /^\/stream\/(movie|series)\/([^/]+)\.json$/.exec(rest);
+  if (streamM)
+    return handleStream(
+      req,
+      res,
+      streamM[1],
+      decodeURIComponent(streamM[2]),
+      pool,
+      publicBase(req),
+    );
+  return sendJson(res, 404, { error: "not found" });
+}
+
 function publicBundle(b, req) {
   return {
     id: b.id,
@@ -882,6 +928,21 @@ async function handleAddBundle(req, res) {
     body = JSON.parse(await readBody(req, 16384));
   } catch (e) {
     return sendJson(res, 400, { error: "bad json body" });
+  }
+  // stateless bundle: client passes manifest URLs; the returned URL encodes
+  // them, so it survives deploys/state wipes (see /bundle/auto route)
+  if (Array.isArray(body && body.urls)) {
+    const urls = body.urls.filter((u) => typeof u === "string" && u.trim());
+    if (!urls.length) return sendJson(res, 400, { error: "no plugin urls" });
+    const enc = Buffer.from(JSON.stringify(urls)).toString("base64url");
+    return sendJson(res, 201, {
+      bundle: {
+        id: autoBundleId(urls),
+        urls,
+        stateless: true,
+        url: publicBase(req) + "/bundle/auto/" + enc + "/manifest.json",
+      },
+    });
   }
   const ids = Array.isArray(body && body.pluginIds)
     ? body.pluginIds.filter((id) => typeof id === "string" && plugins.has(id))
@@ -906,6 +967,41 @@ function handleDeleteBundle(req, res, id) {
 }
 
 // POST /api/plugins {url} — fetch + install a plugin, return its addon URL
+// install a plugin from its manifest url (idempotent: reuses the installed
+// entry when present). Shared by POST /api/plugins and stateless bundles.
+const installing = new Map(); // url -> Promise<id>, single-flight per url
+async function installPluginFromUrl(url, name = "") {
+  const existing = state.find((e) => e.url === url);
+  if (existing && plugins.has(existing.id)) return existing.id;
+  if (installing.has(url)) return installing.get(url);
+  const job = (async () => {
+    const source = url.endsWith(".sky")
+      ? await fetchPluginSourceFromSky(url, name)
+      : await fetchPluginSource(url);
+    const id = uniqueId(slugify(source.name));
+    const plugin = makePlugin(id, source.name, source.code, source.descriptor);
+    const pool = poolFor(plugin);
+    await warmPlugin(plugin, pool).catch((e) => {
+      plugin.status = "error";
+      plugin.error = e.message;
+      console.warn("warm", plugin.name, "failed:", e.message);
+    });
+    writePluginFiles(plugin, source.code, source.descriptor);
+    state.push({ id, name: source.name, url, addedAt: Date.now() });
+    saveState();
+    plugins.set(id, plugin);
+    rebuildPrefixMap(globalPool);
+    console.log("added plugin:", id, "<-", url);
+    return id;
+  })();
+  installing.set(url, job);
+  try {
+    return await job;
+  } finally {
+    installing.delete(url);
+  }
+}
+
 async function handleAddPlugin(req, res) {
   let body;
   try {
@@ -917,37 +1013,17 @@ async function handleAddPlugin(req, res) {
   if (!url) return sendJson(res, 400, { error: "missing url" });
   if (state.some((e) => e.url === url))
     return sendJson(res, 409, { error: "plugin already added" });
-  let source;
+  let id;
   try {
-    source = url.endsWith(".sky")
-      ? await fetchPluginSourceFromSky(
-          url,
-          typeof body.name === "string" ? body.name : "",
-        )
-      : await fetchPluginSource(url);
+    id = await installPluginFromUrl(
+      url,
+      typeof body.name === "string" ? body.name : "",
+    );
   } catch (e) {
     return sendJson(res, 400, { error: e.message });
   }
-  const id = uniqueId(slugify(source.name));
-  const plugin = makePlugin(id, source.name, source.code, source.descriptor);
-  const pool = poolFor(plugin);
-  // non-fatal: a warm failure (flaky upstream, bad getHome payload) must not
-  // take down the add request — or worse, the whole server. Keep the plugin
-  // with status "error" and let the manifest self-heal retry it.
-  await warmPlugin(plugin, pool).catch((e) => {
-    plugin.status = "error";
-    plugin.error = e.message;
-    console.warn("warm", plugin.name, "failed:", e.message);
-  });
-  // non-fatal warm failures don't block persistence — the plugin stays
-  // installed and the manifest self-heal retries it
-  writePluginFiles(plugin, source.code, source.descriptor);
-  state.push({ id, name: source.name, url, addedAt: Date.now() });
-  saveState();
-  plugins.set(id, plugin);
-  rebuildPrefixMap(globalPool);
-  console.log("added plugin:", id, "<-", url);
-  sendJson(res, 201, { plugin: publicPlugin(state[state.length - 1], req) });
+  const entry = state.find((e) => e.id === id);
+  sendJson(res, 201, { plugin: publicPlugin(entry, req) });
 }
 
 // POST /api/repos {url} — fetch a SkyStream repo.json and list its plugins
@@ -1353,46 +1429,50 @@ const server = http.createServer(async (req, res) => {
     if (bundleM) {
       const b = bundles.find((x) => x.id === bundleM[1]);
       if (!b) return sendJson(res, 404, { error: "bundle not found" });
-      const pool = bundlePool(b);
-      const rest = "/" + bundleM[2];
-      if (rest === "/manifest.json")
-        return sendJson(
-          res,
-          200,
-          manifest(pool, req, config.id + "-bundle-" + b.id),
-        );
-      const proxyM = /^\/proxy\/(.+)$/.exec(rest);
-      if (proxyM) return handleProxy(req, res, proxyM[1]);
-      const catM = /^\/catalog\/(movie|series)\/([^/]+)\.json$/.exec(rest);
-      if (catM)
-        return handleCatalog(
-          req,
-          res,
-          catM[1],
-          decodeURIComponent(catM[2]),
-          query.get("search"),
-          pool,
-        );
-      const metaM = /^\/meta\/(movie|series)\/([^/]+)\.json$/.exec(rest);
-      if (metaM)
-        return handleMeta(
-          req,
-          res,
-          metaM[1],
-          decodeURIComponent(metaM[2]),
-          pool,
-        );
-      const streamM = /^\/stream\/(movie|series)\/([^/]+)\.json$/.exec(rest);
-      if (streamM)
-        return handleStream(
-          req,
-          res,
-          streamM[1],
-          decodeURIComponent(streamM[2]),
-          pool,
-          publicBase(req),
-        );
-      return sendJson(res, 404, { error: "not found" });
+      return serveBundleDispatch(
+        req,
+        res,
+        bundlePool(b),
+        config.id + "-bundle-" + b.id,
+        "/" + bundleM[2],
+        query,
+      );
+    }
+    // stateless bundle: the URL carries the plugin manifest URLs, so it
+    // survives state wipes (Render ephemeral disk). Plugins are (re)installed
+    // on demand from their original manifests — first hit after a wipe is
+    // slow, later hits use the in-memory plugins map.
+    const autoM = /^\/bundle\/auto\/([A-Za-z0-9_-]+)\/(.+)$/.exec(url);
+    if (autoM) {
+      let urls;
+      try {
+        urls = JSON.parse(Buffer.from(autoM[1], "base64url").toString());
+      } catch (e) {
+        urls = null;
+      }
+      if (!Array.isArray(urls) || !urls.length)
+        return sendJson(res, 400, { error: "bad bundle payload" });
+      const ids = [];
+      for (const u of urls) {
+        if (typeof u !== "string") continue;
+        try {
+          ids.push(await installPluginFromUrl(u));
+        } catch (e) {
+          console.warn("bundle skip", u, "-", e.message);
+        }
+      }
+      if (!ids.length)
+        return sendJson(res, 404, {
+          error: "no installable plugins in bundle",
+        });
+      return serveBundleDispatch(
+        req,
+        res,
+        bundlePool({ id: autoBundleId(urls), pluginIds: ids }),
+        config.id + "-bundle-" + autoBundleId(urls),
+        "/" + autoM[2],
+        query,
+      );
     }
 
     // ---- per-plugin addon URLs: /<id>/<route> ----
@@ -1407,7 +1487,7 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 200, manifest(pool, req));
       const proxyM = /^\/proxy\/(.+)$/.exec(rest);
       if (proxyM) return handleProxy(req, res, proxyM[1]);
-      const catM = /^\/catalog\/(movie|series)\/([^/]+)\.json$/.exec(rest);
+      const catM = /^\/catalog\/(movie|series)\/([^/]+)(?:\/[^/]+)?\.json$/.exec(rest);
       if (catM)
         return handleCatalog(
           req,

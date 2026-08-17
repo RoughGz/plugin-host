@@ -82,7 +82,16 @@
   }
 
   // shared card body for installed and repo plugins; key is the selection key
-  function cardHtml({ key, name, status, error, catalogs, url, isRepo }) {
+  function cardHtml({
+    key,
+    name,
+    status,
+    error,
+    catalogs,
+    url,
+    isRepo,
+    installUrl,
+  }) {
     const sel = selected.has(key);
     const statusCls =
       status === "error"
@@ -124,15 +133,15 @@
         </button>
       </div>
       <div class="card-actions">
+        <button class="btn btn-ghost btn-sm" data-split-link="${esc(key)}">Separate Addon link for this plugin</button>
         ${
           isRepo
-            ? `<button class="btn btn-primary btn-sm" data-install="${esc(url)}">Install in Stremio</button>`
+            ? `<button class="btn btn-primary btn-sm" data-install="${esc(installUrl || url)}">Install in Stremio</button>`
             : `<a class="btn btn-primary btn-sm" href="${esc(stremioInstallUrl(url))}">
             <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-4-4m4 4l4-4"/><path d="M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2"/></svg>
             Install in Stremio
           </a>`
         }
-        <button class="btn btn-ghost btn-sm" data-copy="${esc(url)}">Copy link</button>
       </div>`;
   }
 
@@ -203,8 +212,9 @@
         status: rp.status,
         error: rp.error,
         catalogs: rp.catalogs,
-        url: rp.url,
+        url: rp.addonUrl || rp.url,
         isRepo: true,
+        installUrl: rp.url,
       });
       grid.appendChild(card);
     }
@@ -478,6 +488,15 @@
   // "Install in Stremio" on a repo card: install it first, then open the
   // plugin's REAL addon URL (the repo entry only points at the raw build file)
   async function installRepoPlugin(url, name) {
+    const plugin = await installPluginOnly(url, name);
+    if (!plugin) return null;
+    window.location.href = stremioInstallUrl(plugin.addonUrl);
+    return plugin;
+  }
+
+  // install without navigating — used by "Separate Addon link" (copy the
+  // per-plugin URL) and the repo card's Install button
+  async function installPluginOnly(url, name) {
     try {
       const res = await api("api/plugins", {
         method: "POST",
@@ -491,9 +510,10 @@
       // real manifest URL
       lastJson = "";
       await load();
-      window.location.href = stremioInstallUrl(data.plugin.addonUrl);
+      return data.plugin;
     } catch (e) {
       toast(e.message, "error");
+      return null;
     }
   }
 
@@ -568,6 +588,29 @@
     const copyBtn = e.target.closest("[data-copy]");
     if (copyBtn) {
       copyText(copyBtn.dataset.copy).then(() => toast("Link copied"));
+      return;
+    }
+    // "Separate Addon link for this plugin": the plugin's own addon URL.
+    // Installed -> copy it; repo card -> install first, then copy the real
+    // per-plugin URL (the box shows the stateless bundle URL instead).
+    const splitBtn = e.target.closest("[data-split-link]");
+    if (splitBtn) {
+      const key = splitBtn.dataset.splitLink;
+      if (key.startsWith("repo:")) {
+        const rp = repoPluginList.find((x) => "repo:" + x.url === key);
+        if (!rp) return;
+        const name = splitBtn.closest(".card").querySelector("h3").textContent;
+        installPluginOnly(rp.url, name).then((plugin) => {
+          if (plugin && plugin.addonUrl)
+            copyText(plugin.addonUrl).then(() =>
+              toast("Addon link copied \u2014 " + plugin.name),
+            );
+        });
+      } else {
+        const p = plugins.find((x) => x.id === key);
+        if (p && p.addonUrl)
+          copyText(p.addonUrl).then(() => toast("Addon link copied"));
+      }
       return;
     }
     const instBtn = e.target.closest("[data-install]");

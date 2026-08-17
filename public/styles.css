@@ -656,10 +656,13 @@ body {
 
 .card-actions {
   display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
   gap: 10px;
 }
 .card-actions .btn {
   flex: 1;
+  min-width: 0;
 }
 
 /* ---------- empty state ---------- */
@@ -781,13 +784,6 @@ body {
     gap: 10px;
   }
   .sel-bar .btn {
-    width: 100%;
-  }
-
-  .card-actions {
-    flex-direction: column;
-  }
-  .card-actions .btn {
     width: 100%;
   }
 

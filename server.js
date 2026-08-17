@@ -1214,7 +1214,19 @@ async function handleListRepo(req, res) {
   const url = body && typeof body.url === "string" ? body.url.trim() : "";
   if (!url) return sendJson(res, 400, { error: "missing url" });
   try {
-    sendJson(res, 200, await fetchRepoPlugins(url));
+    const list = await fetchRepoPlugins(url);
+    // each repo plugin gets a direct addon URL: a stateless bundle that
+    // auto-installs the plugin on first access — the card shows this instead
+    // of the raw .sky build link
+    const base = publicBase(req);
+    for (const p of list.plugins) {
+      p.addonUrl =
+        base +
+        "/bundle/auto/" +
+        Buffer.from(JSON.stringify([p.url])).toString("base64url") +
+        "/manifest.json";
+    }
+    sendJson(res, 200, list);
   } catch (e) {
     sendJson(res, 400, { error: e.message });
   }

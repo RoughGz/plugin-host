@@ -949,8 +949,26 @@ function handleListPlugins(req, res) {
 let bundles = []; // {id, pluginIds, createdAt}
 
 // repo plugins registered by the client (POST /api/repos): slug -> {url, name}
-// ponytail: in-memory only, lost on restart — repos re-register on page load
+const REPO_PLUGINS_FILE = path.join(DATA_DIR, "repo-plugins.json");
 const repoPlugins = new Map();
+
+function loadRepoPlugins() {
+  try {
+    const d = JSON.parse(fs.readFileSync(REPO_PLUGINS_FILE, "utf8"));
+    if (d && typeof d === "object")
+      for (const [k, v] of Object.entries(d)) repoPlugins.set(k, v);
+  } catch (e) {
+    // no registry yet
+  }
+}
+
+function saveRepoPlugins() {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.writeFileSync(
+    REPO_PLUGINS_FILE,
+    JSON.stringify(Object.fromEntries(repoPlugins), null, 2),
+  );
+}
 
 function loadBundles() {
   try {
@@ -1225,6 +1243,7 @@ async function handleListRepo(req, res) {
     for (const p of list.plugins) {
       repoPlugins.set(slugify(p.name), { url: p.url, name: p.name });
     }
+    saveRepoPlugins();
     sendJson(res, 200, list);
   } catch (e) {
     sendJson(res, 400, { error: e.message });
@@ -1792,6 +1811,17 @@ const server = http.createServer(async (req, res) => {
           console.warn("auto-install skip", rp.url, "-", e.message);
         }
       }
+      if (!plugins.has(pluginM[1])) {
+        // multi-provider .sky installs as <slug>-<provider>: point the
+        // request at the first provider addon
+        const alt = [...plugins.keys()].find((k) =>
+          k.startsWith(pluginM[1] + "-"),
+        );
+        if (alt)
+          return res
+            .writeHead(302, { Location: "/" + alt + "/" + pluginM[2] })
+            .end();
+      }
     }
     if (pluginM && plugins.has(pluginM[1])) {
       const id = pluginM[1];
@@ -1902,6 +1932,7 @@ async function boot() {
   await loadState();
   await loadFromState();
   loadBundles();
+  loadRepoPlugins();
   booting = false;
   server.listen(PORT, () => {
     console.log("addon listening on http://localhost:" + PORT);

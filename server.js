@@ -636,9 +636,14 @@ async function warmPlugin(plugin, pool) {
       console.warn("plugin", plugin.name, "getHome returned no sections");
       return;
     }
-    plugin.sections.clear();
+    // merge, don't replace: plugins drop sections whose page fetch failed at
+    // warm time, so a transient upstream failure would shrink the catalog list
+    // until the next good warm — keep stale sections, fresh ones win
+    for (const [slug, section] of plugin.sections) {
+      if (!built.has(slug)) built.set(slug, section);
+    }
+    plugin.sections = built;
     plugin.metaCache.clear();
-    for (const [slug, section] of built) plugin.sections.set(slug, section);
     plugin.sectionsTs = Date.now();
     plugin.status = "ok";
     plugin.error = "";

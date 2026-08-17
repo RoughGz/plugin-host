@@ -16,7 +16,10 @@
   const toasts = $("#toasts");
   const selBar = $("#selBar");
   const selCount = $("#selCount");
+  const selectAllBtn = $("#selectAll");
+  const removeAllBtn = $("#removeAll");
   const makeBundle = $("#makeBundle");
+  const resetBtn = $("#resetBtn");
   const bundleResult = $("#bundleResult");
   const bundleResultUrl = $("#bundleResultUrl");
   const bundleResultInstall = $("#bundleResultInstall");
@@ -26,7 +29,11 @@
   const bundlesSection = $("#bundlesSection");
   const bundleCount = $("#bundleCount");
   const bundleList = $("#bundleList");
+  const repoInfo = $("#repoInfo");
   const selected = new Set();
+  let lastPlugins = [];
+  let repoPluginList = [];
+  let lastJson = "";
 
   function api(path, opts = {}) {
     return fetch(path, opts);
@@ -74,8 +81,65 @@
     return "stremio://" + addonUrl.replace(/^https?:\/\//, "");
   }
 
+  // shared card body for installed and repo plugins; key is the selection key
+  function cardHtml({ key, name, status, error, catalogs, url, isRepo }) {
+    const sel = selected.has(key);
+    const statusCls =
+      status === "error"
+        ? "status-error"
+        : status === "available"
+          ? "status-avail"
+          : "status-live";
+    const statusTxt =
+      status === "error"
+        ? "Error"
+        : status === "available"
+          ? "Available"
+          : "Live";
+    return `
+      <div class="card-head">
+        <div class="card-title">
+          <h3>${esc(name)}</h3>
+          <span class="status ${statusCls}">${statusTxt}</span>
+        </div>
+        <div class="card-tools">
+          <button class="toggle${sel ? " on" : ""}" data-toggle="${esc(key)}" aria-pressed="${sel}" title="Toggle selection" aria-label="Toggle ${esc(name)}"></button>
+          <button class="btn-remove" data-remove="${esc(key)}" title="Remove" aria-label="Remove ${esc(name)}">Remove</button>
+        </div>
+      </div>
+      ${error ? `<p class="card-error-msg">${esc(error)}</p>` : ""}
+      <div class="chips">
+        ${
+          catalogs.length
+            ? catalogs
+                .map((c) => `<span class="chip">${esc(c.name)}</span>`)
+                .join("")
+            : '<span class="chip chip-muted">no catalogs</span>'
+        }
+      </div>
+      <div class="url-row">
+        <code class="url" title="${esc(url)}">${esc(url)}</code>
+        <button class="icon-btn" data-copy="${esc(url)}" title="Copy link" aria-label="Copy link">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+        </button>
+      </div>
+      <div class="card-actions">
+        ${
+          isRepo
+            ? `<button class="btn btn-primary btn-sm" data-install="${esc(url)}">Install in Stremio</button>`
+            : `<a class="btn btn-primary btn-sm" href="${esc(stremioInstallUrl(url))}">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-4-4m4 4l4-4"/><path d="M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2"/></svg>
+            Install in Stremio
+          </a>`
+        }
+        <button class="btn btn-ghost btn-sm" data-copy="${esc(url)}">Copy link</button>
+      </div>`;
+  }
+
   function render(plugins) {
-    grid.innerHTML = "";
+    lastPlugins = plugins;
+    // remove only the plugin cards — the add card lives in the grid too
+    grid.querySelectorAll(".card").forEach((c) => c.remove());
     empty.hidden = plugins.length > 0;
     stats.hidden = plugins.length === 0;
     statPlugins.textContent = plugins.length;
@@ -99,136 +163,70 @@
       const card = document.createElement("article");
       card.className = "card" + (p.status === "error" ? " card-error" : "");
       if (selected.has(p.id)) card.classList.add("card-selected");
-      card.innerHTML = `
-        <div class="card-head">
-          <div class="card-title">
-            <input type="checkbox" class="card-check" data-check="${esc(p.id)}" title="Select for a bundle" aria-label="Select ${esc(p.name)}" ${selected.has(p.id) ? "checked" : ""}>
-            <h3>${esc(p.name)}</h3>
-            <span class="status status-${p.status === "error" ? "error" : "live"}">
-              ${p.status === "error" ? "Error" : "Live"}
-            </span>
-          </div>
-          <button class="btn-remove" data-remove="${esc(p.id)}" title="Remove plugin" aria-label="Remove ${esc(p.name)}">
-            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/></svg>
-            Remove
-          </button>
-        </div>
-        ${p.status === "error" ? `<p class="card-error-msg">${esc(p.error)}</p>` : ""}
-        <div class="chips">
-          ${
-            p.catalogs.length
-              ? p.catalogs
-                  .map((c) => `<span class="chip">${esc(c.name)}</span>`)
-                  .join("")
-              : '<span class="chip chip-muted">no catalogs</span>'
-          }
-        </div>
-        <div class="url-row">
-          <code class="url" title="${esc(p.addonUrl)}">${esc(p.addonUrl)}</code>
-          <button class="icon-btn" data-copy="${esc(p.addonUrl)}" title="Copy addon URL" aria-label="Copy addon URL">
-            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
-          </button>
-        </div>
-        <div class="card-actions">
-          <a class="btn btn-primary btn-sm" href="${esc(stremioInstallUrl(p.addonUrl))}">
-            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-4-4m4 4l4-4"/><path d="M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2"/></svg>
-            Install in Stremio
-          </a>
-          <button class="btn btn-ghost btn-sm" data-copy="${esc(p.addonUrl)}">Copy link</button>
-        </div>`;
+      card.innerHTML = cardHtml({
+        key: p.id,
+        name: p.name,
+        status: p.status,
+        error: p.error,
+        catalogs: p.catalogs,
+        url: p.addonUrl,
+        isRepo: false,
+      });
       grid.appendChild(card);
     }
 
-    // repo plugins (not installed yet) render as cards too — tick them and
-    // "Generate bundle URL" installs them first, then bundles everything
+    // repo plugins render as normal cards too (status/catalogs come from a
+    // client-side probe of their manifest URL)
     for (const rp of repoPluginList) {
       if (plugins.some((p) => p.url === rp.url)) continue; // already installed
       const card = document.createElement("article");
-      card.className = "card card-repo";
+      card.className = "card" + (rp.status === "error" ? " card-error" : "");
       if (selected.has("repo:" + rp.url)) card.classList.add("card-selected");
-      card.innerHTML = `
-        <div class="card-head">
-          <div class="card-title">
-            <input type="checkbox" class="card-check" data-repo="${esc(rp.url)}" title="Select for a bundle" aria-label="Select ${esc(rp.name)}" ${selected.has("repo:" + rp.url) ? "checked" : ""}>
-            <h3>${esc(rp.name)}</h3>
-            <span class="status status-repo">Available</span>
-          </div>
-        </div>
-        ${rp.description ? `<p class="card-desc">${esc(rp.description)}</p>` : ""}
-        <div class="chips">
-          ${
-            rp.categories.length
-              ? rp.categories
-                  .map((c) => `<span class="chip">${esc(c)}</span>`)
-                  .join("")
-              : '<span class="chip chip-muted">from repository</span>'
-          }
-        </div>
-        <p class="repo-hint">Tick it and press "Generate bundle URL" to install + bundle.</p>`;
+      card.innerHTML = cardHtml({
+        key: "repo:" + rp.url,
+        name: rp.name,
+        status: rp.status,
+        error: rp.error,
+        catalogs: rp.catalogs,
+        url: rp.url,
+        isRepo: true,
+      });
       grid.appendChild(card);
     }
   }
 
-  let lastJson = "";
   function updateSelBar() {
-    selBar.hidden = selected.size === 0;
     selCount.textContent =
       selected.size +
       (selected.size === 1 ? " plugin selected" : " plugins selected");
+    makeBundle.disabled = selected.size === 0;
   }
 
   async function createBundle() {
     if (!selected.size) return;
     makeBundle.disabled = true;
     try {
-      // repo-selected plugins aren't installed yet — install them first so
-      // the bundle has real plugin ids. One failure doesn't block the rest.
-      const repoUrls = [...selected]
-        .filter((k) => k.startsWith("repo:"))
-        .map((k) => k.slice(5));
-      const names = new Map(repoPluginList.map((p) => [p.url, p.name]));
-      const ids = [...selected].filter((k) => !k.startsWith("repo:"));
-      const failed = [];
-      for (const url of repoUrls) {
-        try {
-          const res = await api("api/plugins", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ url, name: names.get(url) || "" }),
-          });
-          const data = await res.json().catch(() => ({}));
-          if (!res.ok) throw new Error(data.error || "HTTP " + res.status);
-          ids.push(data.plugin.id);
-        } catch (e) {
-          failed.push((names.get(url) || url) + ": " + e.message);
-        }
-      }
-      if (!ids.length) {
-        toast(
-          "Nothing to bundle" +
-            (failed.length ? " — " + failed.join(" | ") : ""),
-          "error",
-        );
+      // stateless bundle: the URL encodes the manifest URLs, so it survives
+      // restarts. Selection is kept — nothing is removed from the list.
+      const urls = [...selected]
+        .map((k) => {
+          if (k.startsWith("repo:")) return k.slice(5);
+          const p = lastPlugins.find((x) => x.id === k);
+          return p ? p.url : null;
+        })
+        .filter(Boolean);
+      if (!urls.length) {
+        toast("Nothing to bundle", "error");
         return;
       }
       const res = await api("api/bundles", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pluginIds: ids }),
+        body: JSON.stringify({ urls }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || "HTTP " + res.status);
       showBundleResult(data.bundle.url);
-      if (failed.length)
-        toast("Some plugins failed: " + failed.join(" | "), "error");
-      selected.clear();
-      updateSelBar();
-      for (const cb of grid.querySelectorAll(".card-check")) {
-        cb.checked = false;
-        cb.closest(".card").classList.remove("card-selected");
-      }
-      await load();
-      await loadBundles();
     } catch (e) {
       toast(e.message, "error");
     } finally {
@@ -351,8 +349,41 @@
   });
 
   // ---- repository: repo.json plugins render into the main grid ----
-  const repoInfo = $("#repoInfo");
-  let repoPluginList = [];
+
+  // status + catalogs come from the plugin's manifest URL. Repo entries that
+  // point at .sky bundles (zips, not manifests) can't be probed — show them
+  // as "Available" with the repo's own categories.
+  async function probeRepoPlugin(rp) {
+    rp.catalogs = (rp.categories || []).map((c) => ({ name: c }));
+    if (/\.sky$/i.test(rp.url)) {
+      rp.status = "available";
+      rp.error = "";
+      return;
+    }
+    rp.status = "error";
+    rp.error = "manifest fetch failed";
+    try {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 8000);
+      const res = await fetch(rp.url, { signal: ctrl.signal });
+      clearTimeout(t);
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const ct = res.headers.get("content-type") || "";
+      if (!ct.includes("json"))
+        throw new Error(
+          "not a manifest (" + (ct || "unknown content type") + ")",
+        );
+      const m = await res.json();
+      rp.status = "live";
+      rp.catalogs = Array.isArray(m.catalogs)
+        ? m.catalogs.map((c) => ({ name: c.name || c.id || "catalog" }))
+        : [];
+    } catch (e) {
+      rp.status = "error";
+      rp.error =
+        e.name === "AbortError" ? "manifest fetch timed out" : e.message;
+    }
+  }
 
   async function loadRepo(url) {
     addBtn.disabled = true;
@@ -367,15 +398,23 @@
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || "HTTP " + res.status);
-      repoPluginList = data.plugins || [];
+      const list = data.plugins || [];
+      repoInfo.textContent =
+        "Repository \u201c" +
+        (data.name || "?") +
+        "\u201d loaded \u2014 probing " +
+        list.length +
+        " plugin manifests\u2026";
+      repoInfo.hidden = false;
+      await Promise.all(list.map(probeRepoPlugin));
+      repoPluginList = list;
       urlInput.value = "";
       repoInfo.textContent =
         "Repository \u201c" +
         (data.name || "?") +
-        "\u201d loaded \u2014 " +
+        "\u201d \u2014 " +
         repoPluginList.length +
-        " plugins below. Tick the ones you want, then press \u201cGenerate bundle URL\u201d.";
-      repoInfo.hidden = false;
+        " plugins below.";
       toast("Repo loaded: " + repoPluginList.length + " plugins");
       // load() skips re-render when the plugin list didn't change — force it
       // so the repo's cards show up in the grid
@@ -391,36 +430,93 @@
     }
   }
 
+  // "Install in Stremio" on a repo card: install it first, then open Stremio
+  async function installRepoPlugin(url, name) {
+    try {
+      const res = await api("api/plugins", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url, name }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "HTTP " + res.status);
+      toast("Installed " + data.plugin.name);
+      window.location.href = stremioInstallUrl(url);
+    } catch (e) {
+      toast(e.message, "error");
+    }
+  }
+
+  // Remove from the repo list; uninstall too if it was installed
+  async function removeRepoPlugin(url, name) {
+    if (!confirm('Remove "' + name + '" from the repository list?')) return;
+    repoPluginList = repoPluginList.filter((p) => p.url !== url);
+    selected.delete("repo:" + url);
+    const installed = lastPlugins.find((p) => p.url === url);
+    if (installed) {
+      await api("api/plugins/" + encodeURIComponent(installed.id), {
+        method: "DELETE",
+      });
+      toast("Removed " + name);
+      lastJson = "";
+      await load();
+    } else {
+      render(lastPlugins);
+    }
+  }
+
+  function selectAll() {
+    for (const p of lastPlugins) selected.add(p.id);
+    for (const rp of repoPluginList) selected.add("repo:" + rp.url);
+    render(lastPlugins);
+  }
+
+  function removeAll() {
+    selected.clear();
+    render(lastPlugins);
+  }
+
+  async function resetAll() {
+    selected.clear();
+    repoPluginList = [];
+    repoInfo.hidden = true;
+    lastJson = "";
+    updateSelBar();
+    await load();
+    toast("Reset \u2014 back to installed plugins");
+  }
+
   grid.addEventListener("click", (e) => {
+    const tgl = e.target.closest(".toggle");
+    if (tgl) {
+      const key = tgl.dataset.toggle;
+      if (selected.has(key)) selected.delete(key);
+      else selected.add(key);
+      tgl.classList.toggle("on", selected.has(key));
+      tgl.setAttribute("aria-pressed", selected.has(key));
+      tgl.closest(".card").classList.toggle("card-selected", selected.has(key));
+      updateSelBar();
+      return;
+    }
     const copyBtn = e.target.closest("[data-copy]");
     if (copyBtn) {
       copyText(copyBtn.dataset.copy).then(() => toast("Link copied"));
+      return;
+    }
+    const instBtn = e.target.closest("[data-install]");
+    if (instBtn) {
+      const name = instBtn.closest(".card").querySelector("h3").textContent;
+      installRepoPlugin(instBtn.dataset.install, name);
       return;
     }
     const rmBtn = e.target.closest("[data-remove]");
     if (rmBtn) {
       const card = rmBtn.closest(".card");
       const name = card.querySelector("h3").textContent;
-      removePlugin(rmBtn.dataset.remove, name);
-      return;
+      const key = rmBtn.dataset.remove;
+      if (key.startsWith("repo:")) removeRepoPlugin(key.slice(5), name);
+      else removePlugin(key, name);
     }
-    // clicking anywhere else on a card toggles its checkbox
-    const card = e.target.closest(".card");
-    if (card && !e.target.closest("button, a, input")) {
-      const cb = card.querySelector(".card-check");
-      cb.checked = !cb.checked;
-      cb.dispatchEvent(new Event("change", { bubbles: true }));
-    }
-  });
-
-  grid.addEventListener("change", (e) => {
-    const cb = e.target.closest(".card-check");
-    if (!cb) return;
-    const key = cb.dataset.repo ? "repo:" + cb.dataset.repo : cb.dataset.check;
-    if (cb.checked) selected.add(key);
-    else selected.delete(key);
-    cb.closest(".card").classList.toggle("card-selected", cb.checked);
-    updateSelBar();
   });
 
   bundleList.addEventListener("click", (e) => {
@@ -433,6 +529,9 @@
     if (delBtn) deleteBundle(delBtn.dataset.bdel);
   });
 
+  selectAllBtn.addEventListener("click", selectAll);
+  removeAllBtn.addEventListener("click", removeAll);
+  resetBtn.addEventListener("click", resetAll);
   makeBundle.addEventListener("click", createBundle);
   bundleResultCopy.addEventListener("click", () =>
     copyText(bundleResultUrl.textContent).then(() => toast("Link copied")),

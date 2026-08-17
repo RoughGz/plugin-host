@@ -38,32 +38,6 @@
     </header>
 
     <main class="container">
-      <section class="add-card">
-        <div class="add-card-head">
-          <h2>Add a plugin or repository</h2>
-          <p class="hint">
-            1. Add a plugin URL or load a repo.json &bull; 2. Tick plugins
-            &bull; 3. Generate bundle URL &bull; 4. Install in Stremio
-          </p>
-        </div>
-        <form id="addForm" class="add-form">
-          <input
-            id="urlInput"
-            type="url"
-            spellcheck="false"
-            autocomplete="off"
-            placeholder="https://github.com/user/repo/tree/main/plugin-folder  or  .../repo.json"
-            required
-          />
-          <button type="submit" class="btn btn-primary" id="addBtn">
-            <span class="btn-label">Add</span>
-            <span class="spinner" hidden></span>
-          </button>
-        </form>
-        <div id="addError" class="alert alert-error" hidden></div>
-        <div id="repoInfo" class="repo-info" hidden></div>
-      </section>
-
       <section class="plugins-section">
         <div class="section-head">
           <h2>Your plugins</h2>
@@ -73,11 +47,20 @@
           <div class="stat"><span id="statCatalogs">0</span> catalogs</div>
           <div class="stat stat-live"><span id="statLive">0</span> live</div>
         </div>
-        <div class="sel-bar" id="selBar" hidden>
-          <span id="selCount"></span>
-          <button id="makeBundle" class="btn btn-primary btn-sm">
-            Generate bundle URL
-          </button>
+        <div class="sel-bar" id="selBar">
+          <span id="selCount">0 plugins selected</span>
+          <div class="sel-actions">
+            <button id="selectAll" class="btn btn-ghost btn-sm">
+              Select all
+            </button>
+            <button id="removeAll" class="btn btn-ghost btn-sm">
+              Remove all from selection
+            </button>
+            <button id="makeBundle" class="btn btn-primary btn-xs" disabled>
+              Generate URL for selection
+            </button>
+            <button id="resetBtn" class="btn btn-ghost btn-sm">Reset</button>
+          </div>
         </div>
         <div id="bundleResult" class="bundle-result" hidden>
           <div class="bundle-result-head">
@@ -138,7 +121,34 @@
             </button>
           </div>
         </div>
-        <div id="grid" class="grid"></div>
+        <div id="grid" class="grid">
+          <section class="add-card">
+            <div class="add-card-head">
+              <h2>Add a plugin or repository</h2>
+              <p class="hint">
+                1. Add a plugin URL or load a repo.json &bull; 2. Toggle plugins
+                &bull; 3. Generate URL for selection &bull; 4. Install in
+                Stremio
+              </p>
+            </div>
+            <form id="addForm" class="add-form">
+              <input
+                id="urlInput"
+                type="url"
+                spellcheck="false"
+                autocomplete="off"
+                placeholder="https://github.com/user/repo/tree/main/plugin-folder  or  .../repo.json"
+                required
+              />
+              <button type="submit" class="btn btn-primary" id="addBtn">
+                <span class="btn-label">Add</span>
+                <span class="spinner" hidden></span>
+              </button>
+            </form>
+            <div id="addError" class="alert alert-error" hidden></div>
+            <div id="repoInfo" class="repo-info" hidden></div>
+          </section>
+        </div>
         <div id="empty" class="empty" hidden>
           <svg
             viewBox="0 0 24 24"

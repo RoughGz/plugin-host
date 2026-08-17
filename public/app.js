@@ -136,18 +136,33 @@
       </div>`;
   }
 
+  // header stats reflect the SELECTION when one is active (live, real-time),
+  // otherwise the installed plugins
+  function updateStats() {
+    const src = selected.size
+      ? [...selected]
+          .map((k) =>
+            k.startsWith("repo:")
+              ? repoPluginList.find((p) => "repo:" + p.url === k)
+              : lastPlugins.find((p) => p.id === k),
+          )
+          .filter(Boolean)
+      : lastPlugins;
+    stats.hidden = src.length === 0;
+    statPlugins.textContent = src.length;
+    statCatalogs.textContent = src.reduce(
+      (n, p) => n + (p.catalogs || []).length,
+      0,
+    );
+    statLive.textContent = src.filter((p) => p.status !== "error").length;
+  }
+
   function render(plugins) {
     lastPlugins = plugins;
     // remove only the plugin cards — the add card lives in the grid too
     grid.querySelectorAll(".card").forEach((c) => c.remove());
     empty.hidden = plugins.length > 0;
-    stats.hidden = plugins.length === 0;
-    statPlugins.textContent = plugins.length;
-    statCatalogs.textContent = plugins.reduce(
-      (n, p) => n + p.catalogs.length,
-      0,
-    );
-    statLive.textContent = plugins.filter((p) => p.status !== "error").length;
+    updateStats();
     for (const id of selected) {
       if (id.startsWith("repo:")) {
         // keep repo selections only while the repo plugin is still listed
@@ -200,6 +215,7 @@
       selected.size +
       (selected.size === 1 ? " plugin selected" : " plugins selected");
     makeBundle.disabled = selected.size === 0;
+    updateStats();
     // live preview: selected plugins and their catalogs, real-time
     const selPreview = $("#selPreview");
     if (!selected.size) {
@@ -230,6 +246,8 @@
   async function createBundle() {
     if (!selected.size) return;
     makeBundle.disabled = true;
+    makeBundle.querySelector(".btn-label").hidden = true;
+    makeBundle.querySelector(".spinner").hidden = false;
     try {
       // stateless bundle: the URL encodes the manifest URLs, so it survives
       // restarts. Selection is kept — nothing is removed from the list.
@@ -256,6 +274,8 @@
       toast(e.message, "error");
     } finally {
       makeBundle.disabled = false;
+      makeBundle.querySelector(".btn-label").hidden = false;
+      makeBundle.querySelector(".spinner").hidden = true;
     }
   }
 
@@ -455,7 +475,8 @@
     }
   }
 
-  // "Install in Stremio" on a repo card: install it first, then open Stremio
+  // "Install in Stremio" on a repo card: install it first, then open the
+  // plugin's REAL addon URL (the repo entry only points at the raw build file)
   async function installRepoPlugin(url, name) {
     try {
       const res = await api("api/plugins", {
@@ -466,7 +487,11 @@
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || "HTTP " + res.status);
       toast("Installed " + data.plugin.name);
-      window.location.href = stremioInstallUrl(url);
+      // re-render so the repo card becomes a live installed card with its
+      // real manifest URL
+      lastJson = "";
+      await load();
+      window.location.href = stremioInstallUrl(data.plugin.addonUrl);
     } catch (e) {
       toast(e.message, "error");
     }
@@ -503,24 +528,29 @@
 
   async function resetAll() {
     // wipe everything: installed plugins, selection, repo list — fresh start
-    const ids = lastPlugins.map((p) => p.id);
-    const del = ids.map((id) =>
-      fetch(`/api/plugins/${encodeURIComponent(id)}`, {
-        method: "DELETE",
-      }).then((r) => r.ok),
-    );
-    await Promise.allSettled(del);
-    selected.clear();
-    repoPluginList = [];
-    repoInfo.hidden = true;
-    lastJson = "";
-    updateSelBar();
-    await load();
-    toast(
-      ids.length
-        ? "Reset \u2014 all plugins removed"
-        : "Reset \u2014 fresh start",
-    );
+    resetBtn.disabled = true;
+    try {
+      const ids = lastPlugins.map((p) => p.id);
+      const del = ids.map((id) =>
+        fetch(`/api/plugins/${encodeURIComponent(id)}`, {
+          method: "DELETE",
+        }).then((r) => r.ok),
+      );
+      await Promise.allSettled(del);
+      selected.clear();
+      repoPluginList = [];
+      repoInfo.hidden = true;
+      lastJson = "";
+      updateSelBar();
+      await load();
+      toast(
+        ids.length
+          ? "Reset \u2014 all plugins removed"
+          : "Reset \u2014 fresh start",
+      );
+    } finally {
+      resetBtn.disabled = false;
+    }
   }
 
   grid.addEventListener("click", (e) => {

@@ -22,6 +22,11 @@ fs.mkdirSync(DATA_DIR, { recursive: true });
 const PORT = process.env.PORT || 3999;
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS) || 10 * 60 * 1000;
 const META_CACHE_MAX = 200;
+// cap live plugin workers (each holds a ~64MB heap) — public install is
+// unauthenticated by design, so the blast radius of a spray is bounded
+const MAX_PLUGINS = Number(process.env.MAX_PLUGINS) || 60;
+// ids are slugs: [a-z0-9_-]; reject anything else from persisted state
+const ID_RE = /^[a-z0-9][a-z0-9_-]*$/;
 const DEFAULT_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36";
 
@@ -220,10 +225,19 @@ function destroyPool(pool) {
 }
 
 function publicBase(req) {
-  return (
-    (process.env.PUBLIC_URL || config.publicUrl || "").replace(/\/$/, "") ||
-    "https://" + (req.headers.host || "localhost:" + PORT)
+  const configured = (process.env.PUBLIC_URL || config.publicUrl || "").replace(
+    /\/$/,
+    "",
   );
+  // host-header poisoning guard: only trust the Host header when no canonical
+  // public URL is configured (dev mode); otherwise use the configured URL
+  if (configured) return configured;
+  const host = String(req.headers.host || "localhost:" + PORT);
+  const proto =
+    req.headers["x-forwarded-proto"] === "https" || req.socket.encrypted
+      ? "https"
+      : "http";
+  return proto + "://" + host.replace(/[^\w.:-]/g, "");
 }
 
 function slugify(s) {
@@ -285,8 +299,19 @@ function itemPoster(item) {
   return httpsImg(item.posterUrl || item.logoUrl) || undefined;
 }
 
-function mapItem(item) {
+function mapItem(item, sectionSlug) {
   let type = mapType(item.type);
+  // plugins often label every catalog row "movie" (vegamovies card() does)
+  // while the detail page is a series — a series-y section slug wins so the
+  // home board doesn't show series as movies (and vice versa stays as-is)
+  if (
+    type === "movie" &&
+    sectionSlug &&
+    /series|show|drama|anime|korean|tv_|episode|ongoing|airing|cartoon/i.test(
+      sectionSlug,
+    )
+  )
+    type = "series";
   // same single-episode rule as mapMeta: a "series" with exactly one episode
   // is a movie (single-episode VOD); no episodes at all stays series
   const episodes = Array.isArray(item.episodes) ? item.episodes : [];
@@ -342,8 +367,26 @@ function normalizeReleased(v) {
 }
 
 function mapMeta(item) {
+  const rawType = String(item.type || "").toLowerCase();
+  // trust an explicit movie/series label; only ambiguous types (anime/show/tv/
+  // unset) get resolved from episode count — a multi-part movie must not be
+  // forced into a series because it happens to have >1 episodes
+  const isExplicitMovie =
+    rawType === "movie" || rawType === "movies" || rawType === "film";
+  const isExplicitSeries = [
+    "series",
+    "tv",
+    "tvseries",
+    "tvshow",
+    "tvshows",
+    "show",
+  ].includes(rawType);
   let type = mapType(item.type);
   const episodes = Array.isArray(item.episodes) ? item.episodes : [];
+  if (!isExplicitMovie && !isExplicitSeries) {
+    if (episodes.length > 1) type = "series";
+    else if (episodes.length === 1) type = "movie";
+  }
   // SkyStream parity: a series with exactly one episode is treated as a movie
   // (single-episode VOD), and livestreams are movies too
   if (type === "series" && episodes.length === 1) type = "movie";
@@ -409,9 +452,9 @@ function mapMeta(item) {
 function transformStreamUrl(url, base) {
   if (typeof url !== "string") return url;
   if (url.startsWith("MAGIC_PROXY_v2") || url.startsWith("MAGIC_PROXY_v1"))
-    return base + "/proxy/" + Buffer.from(url.slice(15)).toString("base64url");
+    return base + "/proxy/" + Buffer.from(url.slice(14)).toString("base64url");
   if (url.startsWith("MAGIC_PROXY:"))
-    return base + "/proxy/" + Buffer.from(url.slice(11)).toString("base64url");
+    return base + "/proxy/" + Buffer.from(url.slice(12)).toString("base64url");
   if (url.startsWith("magic_m3u8:"))
     return base + "/proxy/" + Buffer.from(url.slice(11)).toString("base64url");
   return url;
@@ -480,11 +523,21 @@ async function loadFromState() {
   await Promise.all(
     state.map(async (entry) => {
       try {
+        // ids come from persisted state (file or `state` git branch) — reject
+        // anything that isn't a slug so a tampered entry can't traverse paths
+        if (!ID_RE.test(entry.id || "")) {
+          console.warn("skipping state entry with unsafe id:", entry.id);
+          return;
+        }
         const { name, code, descriptor } = entry.url.endsWith(".sky")
           ? await fetchPluginSourceFromSky(entry.url, entry.name || "")
           : await fetchPluginSource(entry.url);
-        const plugin = makePlugin(entry.id, name, code, descriptor);
-        writePluginFiles(plugin, code, descriptor);
+        // multi-provider packages: re-inject the provider this entry represents
+        const full = entry.providerId
+          ? { ...descriptor, providerId: entry.providerId }
+          : descriptor;
+        const plugin = makePlugin(entry.id, name, code, full);
+        writePluginFiles(plugin, code, full);
         plugins.set(entry.id, plugin);
         console.log("loaded plugin:", entry.id);
       } catch (e) {
@@ -653,9 +706,26 @@ function pluginForId(id, pool) {
 const probeCache = new Map(); // id -> { pluginId, ts } | { miss: true, ts }
 const PROBE_TIMEOUT_MS = 15000;
 const PROBE_NEGATIVE_TTL_MS = 60000;
+const PROBE_CACHE_MAX = 500;
+
+function probeCachePut(id, value) {
+  if (probeCache.size >= PROBE_CACHE_MAX) {
+    let oldestKey = null,
+      oldestTs = Infinity;
+    for (const [k, v] of probeCache) {
+      if (v.ts < oldestTs) {
+        oldestTs = v.ts;
+        oldestKey = k;
+      }
+    }
+    if (oldestKey) probeCache.delete(oldestKey);
+  }
+  probeCache.set(id, value);
+}
 
 async function probePluginForId(id, pool) {
-  const cached = probeCache.get(id);
+  const isGlobal = pool === globalPool;
+  const cached = isGlobal ? probeCache.get(id) : null;
   if (cached) {
     if (cached.pluginId) {
       const p = pool.plugins.get(cached.pluginId);
@@ -668,7 +738,7 @@ async function probePluginForId(id, pool) {
   for (const p of pool.plugins.values()) {
     for (const section of p.sections.values()) {
       if (section.items.some((it) => it && it.url === id)) {
-        probeCache.set(id, { pluginId: p.id, ts: Date.now() });
+        probeCachePut(id, { pluginId: p.id, ts: Date.now() });
         return p;
       }
     }
@@ -702,12 +772,13 @@ async function probePluginForId(id, pool) {
     probeAll,
     new Promise((res) => setTimeout(() => res(null), PROBE_TIMEOUT_MS)),
   ]);
-  probeCache.set(
-    id,
-    winner
-      ? { pluginId: winner.id, ts: Date.now() }
-      : { miss: true, ts: Date.now() },
-  );
+  if (isGlobal)
+    probeCachePut(
+      id,
+      winner
+        ? { pluginId: winner.id, ts: Date.now() }
+        : { miss: true, ts: Date.now() },
+    );
   return winner;
 }
 
@@ -717,6 +788,23 @@ function catalogList(pool) {
   for (const p of pool.plugins.values()) {
     const label = p.descriptor.name || p.name;
     const prefix = p.descriptor.catalogPrefix || p.name;
+    const extras = [
+      { name: "skip", options: ["0", "1", "2", "3"] },
+      { name: "genre", options: [] },
+    ];
+    if (p.sections.size === 0) {
+      // not warmed yet: advertise the descriptor's declared catalogs so the
+      // addon is visible immediately (a slow/failing getHome must not hide it)
+      for (const c of p.descriptor.catalogs || []) {
+        out.push({
+          id: c.id || prefix + "_" + (c.name || slugify(c.id || "")),
+          type: c.type || "movie",
+          name: multi ? label + " • " + (c.name || c.id) : c.name || c.id,
+          extra: extras,
+        });
+      }
+      continue;
+    }
     for (const [slug, section] of p.sections) {
       out.push({
         id: prefix + "_" + slug,
@@ -724,10 +812,7 @@ function catalogList(pool) {
         name: multi ? label + " • " + section.name : section.name,
         // board-compatible: without `extra` Stremio's home board shows
         // "No home rows available ... without required extras"
-        extra: [
-          { name: "skip", options: ["0", "1", "2", "3"] },
-          { name: "genre", options: [] },
-        ],
+        extra: extras,
       });
     }
   }
@@ -738,9 +823,13 @@ function findCatalog(pool, catalogId) {
   for (const p of pool.plugins.values()) {
     const prefix = p.descriptor.catalogPrefix || p.name;
     if (catalogId.startsWith(prefix + "_")) {
-      const section = p.sections.get(catalogId.slice(prefix.length + 1));
-      if (section) return { plugin: p, section };
+      const slug = catalogId.slice(prefix.length + 1);
+      const section = p.sections.get(slug);
+      if (section) return { plugin: p, section, slug };
     }
+    // descriptor-declared catalog (pre-warm fallback): match by exact id
+    const decl = (p.descriptor.catalogs || []).find((c) => c.id === catalogId);
+    if (decl) return { plugin: p, section: null, slug: decl.id };
   }
   return null;
 }
@@ -775,7 +864,12 @@ async function getRawItem(plugin, metaId) {
   const cached = plugin.metaCache.get(metaId);
   if (cached && Date.now() - cached.ts < CACHE_TTL_MS) return cached.value;
   const res = await callPlugin(plugin.runtime, "load", [metaId]);
-  if (!res.success || !res.data || typeof res.data !== "object") return null;
+  if (!res.success || !res.data || typeof res.data !== "object") {
+    // negative cache: a dead id must not re-trigger the full slow load on
+    // every stream/meta request
+    cachePut(plugin.metaCache, metaId, Date.now(), null);
+    return null;
+  }
   // SkyStream parity: plugins may omit `url` in load() results — backfill it
   // with the requested URL (movie playback depends on this)
   if (!res.data.url) res.data.url = metaId;
@@ -900,8 +994,7 @@ function serveBundleDispatch(req, res, pool, manifestId, rest, query) {
       pool,
     );
   const metaM = /^\/meta\/(movie|series)\/(.+)\.json$/.exec(rest);
-  if (metaM)
-    return handleMeta(req, res, metaM[1], decodeId(metaM[2]), pool);
+  if (metaM) return handleMeta(req, res, metaM[1], decodeId(metaM[2]), pool);
   const streamM = /^\/stream\/(movie|series)\/(.+)\.json$/.exec(rest);
   if (streamM)
     return handleStream(
@@ -966,7 +1059,7 @@ async function handleAddBundle(req, res) {
 
 function handleDeleteBundle(req, res, id) {
   const i = bundles.findIndex((b) => b.id === id);
-  if (i === -1) return sendJson(res, 404, { error: "bundle not found" });
+  if (i === -1) return sendJson(res, 200, { ok: true }); // already pruned — idempotent
   bundles.splice(i, 1);
   saveBundles();
   sendJson(res, 200, { ok: true });
@@ -976,14 +1069,77 @@ function handleDeleteBundle(req, res, id) {
 // install a plugin from its manifest url (idempotent: reuses the installed
 // entry when present). Shared by POST /api/plugins and stateless bundles.
 const installing = new Map(); // url -> Promise<id>, single-flight per url
+// installs are rare and id allocation + state push must be atomic (two
+// different URLs with the same plugin name would otherwise collide on the id)
+let installChain = Promise.resolve();
+function withInstallLock(fn) {
+  const run = installChain.then(fn, fn);
+  installChain = run.catch(() => {});
+  return run;
+}
 async function installPluginFromUrl(url, name = "") {
   const existing = state.find((e) => e.url === url);
   if (existing && plugins.has(existing.id)) return existing.id;
   if (installing.has(url)) return installing.get(url);
-  const job = (async () => {
+  const job = withInstallLock(async () => {
+    // re-check under the lock: a concurrent install of the same url may have
+    // completed while we waited
+    const done = state.find((e) => e.url === url);
+    if (done && plugins.has(done.id)) return done.id;
     const source = url.endsWith(".sky")
       ? await fetchPluginSourceFromSky(url, name)
       : await fetchPluginSource(url);
+    const providers =
+      Array.isArray(source.descriptor.providers) &&
+      source.descriptor.providers.length
+        ? source.descriptor.providers
+        : null;
+    if (providers) {
+      // multi-provider package (netmirror/vegamovies/piratexplay style): one
+      // addon per provider, ALL enabled by default — SkyStream parity. The
+      // plugin reads manifest.providerId to pick its source.
+      const seen = new Set();
+      const ids = [];
+      for (const p of providers) {
+        if (!p || !p.id || seen.has(p.id)) continue;
+        seen.add(p.id);
+        if (plugins.size >= MAX_PLUGINS) {
+          console.warn(
+            "max plugins (" + MAX_PLUGINS + ") reached, skipping",
+            p.id,
+          );
+          break;
+        }
+        const pname = p.name || source.name + " " + p.id;
+        const baseId = slugify(source.name) + "-" + slugify(p.id);
+        const id = uniqueId(baseId);
+        const descriptor = { ...source.descriptor, providerId: p.id };
+        const plugin = makePlugin(id, pname, source.code, descriptor);
+        const pool = poolFor(plugin);
+        await warmPlugin(plugin, pool).catch((e) => {
+          plugin.status = "error";
+          plugin.error = e.message;
+          console.warn("warm", plugin.name, "failed:", e.message);
+        });
+        writePluginFiles(plugin, source.code, descriptor);
+        state.push({
+          id,
+          name: pname,
+          url,
+          providerId: p.id,
+          addedAt: Date.now(),
+        });
+        saveState();
+        plugins.set(id, plugin);
+        ids.push(id);
+        console.log("added plugin:", id, "(provider:", p.id + ") <-", url);
+      }
+      rebuildPrefixMap(globalPool);
+      if (!ids.length) throw new Error("no providers could be installed");
+      return ids[0];
+    }
+    if (plugins.size >= MAX_PLUGINS)
+      throw new Error("max plugins (" + MAX_PLUGINS + ") reached");
     const id = uniqueId(slugify(source.name));
     const plugin = makePlugin(id, source.name, source.code, source.descriptor);
     const pool = poolFor(plugin);
@@ -999,7 +1155,7 @@ async function installPluginFromUrl(url, name = "") {
     rebuildPrefixMap(globalPool);
     console.log("added plugin:", id, "<-", url);
     return id;
-  })();
+  });
   installing.set(url, job);
   try {
     return await job;
@@ -1092,6 +1248,9 @@ function manifest(pool, req, idOverride) {
 async function handleCatalog(req, res, type, catalogId, search, pool) {
   const found = findCatalog(pool, catalogId);
   let items = [];
+  const q = new URLSearchParams((req.url || "").split("?")[1] || "");
+  const skip = Math.max(0, Number(q.get("skip")) || 0);
+  const genre = (q.get("genre") || "").trim();
   if (search) {
     // Stremio's global search hits /catalog/<type>/top.json?search=... (and any
     // other unknown id) — route it to the pool's plugins' search and merge
@@ -1128,28 +1287,112 @@ async function handleCatalog(req, res, type, catalogId, search, pool) {
       return sendJson(res, 404, { error: "unknown catalog: " + catalogId });
     if (Date.now() - found.plugin.sectionsTs > CACHE_TTL_MS)
       await warmPlugin(found.plugin, pool);
-    items = found.section.items;
+    // descriptor-declared catalog not warmed yet: warm again (sections are
+    // populated by the warm above) and fall back to an empty list
+    if (!found.section) found = findCatalog(pool, catalogId);
+    items = found.section ? found.section.items : [];
+    // honor the extras the manifest advertises (skip pagination + genre)
+    if (genre) {
+      const g = genre.toLowerCase();
+      items = items.filter((it) =>
+        (it.tags || []).some((t) => String(t).toLowerCase().includes(g)),
+      );
+    }
+    if (skip > 0) items = items.slice(skip, skip + 20);
   }
-  sendJson(res, 200, { metas: items.map(mapItem).filter((m) => m.id) });
+  sendJson(res, 200, {
+    metas: items
+      .map((it) => mapItem(it, found && found.slug))
+      .filter((m) => m.id),
+  });
 }
 
 // ids travel encoded, sometimes double-encoded (proxies re-encode); canonicalize
 function decodeId(raw) {
   let id = decodeURIComponent(raw);
   while (/%[0-9a-fA-F]{2}/.test(id)) {
-    try { const d = decodeURIComponent(id); if (d === id) break; id = d; } catch (e) { break; }
+    try {
+      const d = decodeURIComponent(id);
+      if (d === id) break;
+      id = d;
+    } catch (e) {
+      break;
+    }
   }
   return id;
 }
 
+// ---------- Cinemeta ----------
+// Clients without a metadata addon (Nuvio etc.) render our meta as-is, so the
+// detail page must be complete on its own. When a plugin's item carries an
+// imdb id, fill any missing fields from Cinemeta (poster/description/rating/
+// cast/...). Also mirror Cinemeta for bare tt-ids so this addon can serve as
+// a metadata provider itself. Never fail a request on Cinemeta being down.
+const cinemetaCache = new Map(); // "type:ttid" -> { ts, value: meta|null }
+const CINEMETA_TTL_MS = 24 * 60 * 60 * 1000;
+
+async function cinemetaMeta(imdbId, type) {
+  if (!imdbId || !/^tt\d+$/i.test(imdbId)) return null;
+  const key = type + ":" + imdbId;
+  const cached = cinemetaCache.get(key);
+  if (cached && Date.now() - cached.ts < CINEMETA_TTL_MS) return cached.value;
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 8000);
+    const res = await fetch(
+      "https://v3-cinemeta.strem.io/meta/" + type + "/" + imdbId + ".json",
+      { signal: ctrl.signal },
+    );
+    clearTimeout(t);
+    if (!res.ok) {
+      cinemetaCache.set(key, { ts: Date.now(), value: null });
+      return null;
+    }
+    const j = await res.json();
+    const value = (j && j.meta) || null;
+    cinemetaCache.set(key, { ts: Date.now(), value });
+    return value;
+  } catch (e) {
+    return null;
+  }
+}
+
+// fill only gaps — our plugin data wins, Cinemeta tops up what's missing
+function fillMetaGaps(meta, cm) {
+  if (!cm) return;
+  if (!meta.poster) meta.poster = cm.poster;
+  if (!meta.background) meta.background = cm.background;
+  if (!meta.logo) meta.logo = cm.logo;
+  if (!meta.description) meta.description = cm.description;
+  if (!meta.releaseInfo) meta.releaseInfo = cm.releaseInfo;
+  if (!meta.imdbRating) meta.imdbRating = cm.imdbRating;
+  if (!meta.released) meta.released = cm.released;
+  if (!meta.genres || !meta.genres.length) meta.genres = cm.genres;
+  if (!meta.cast || !meta.cast.length) meta.cast = cm.cast;
+}
 
 async function handleMeta(req, res, type, id, pool) {
+  // bare imdb id: mirror Cinemeta directly — no plugin owns bare tt-ids, and
+  // probing first lets a plugin's load() stub (name = id) win the race
+  if (/^tt\d+$/i.test(id)) {
+    const cm = await cinemetaMeta(id, type);
+    if (cm) return sendJson(res, 200, { meta: cm });
+  }
   let plugin = pluginForId(id, pool);
   if (!plugin) plugin = await probePluginForId(id, pool);
   if (!plugin) return sendJson(res, 404, { error: "no plugin for id: " + id });
   const item = await getRawItem(plugin, id);
   if (!item) return sendJson(res, 404, { error: "meta not found" });
-  sendJson(res, 200, { meta: mapMeta(item) });
+  const meta = mapMeta(item);
+  // enrich from Cinemeta when the plugin knows the imdb id and our meta is
+  // missing fields — clients without Cinemeta get a complete detail page
+  const imdb =
+    item.imdbId || item.imdb_id || (item.ids && item.ids.imdb) || null;
+  if (imdb && (!meta.poster || !meta.description || !meta.imdbRating)) {
+    const cm = await cinemetaMeta(imdb, meta.type);
+    fillMetaGaps(meta, cm);
+  }
+  sendJson(res, 200, { meta });
 }
 
 async function resolveStreams(plugin, metaId, season, episode) {
@@ -1189,29 +1432,39 @@ async function resolveStreams(plugin, metaId, season, episode) {
   }
   return raw;
 }
-
 async function handleStream(req, res, type, id, pool, base) {
-  // only split :s:e off http(s) ids — a URL ending in :digits:digits (rare
-  // but possible) must not be misparsed as a series episode
-  const m =
-    id.startsWith("http") && /^(.*):(\d+):(\d+)$/.exec(id)
-      ? /^(.*):(\d+):(\d+)$/.exec(id)
-      : null;
-  const metaId = m ? m[1] : id;
-  const season = m ? +m[2] : null;
-  const episode = m ? +m[3] : null;
-  let plugin = pluginForId(metaId, pool);
-  if (!plugin) plugin = await probePluginForId(metaId, pool);
-  if (!plugin) return sendJson(res, 404, { error: "no plugin for id: " + id });
+  // SkyStream convention: series video ids are <metaId>:<season>:<episode>.
+  // Try the split interpretation FIRST (anikage http ids, netmirror JSON-blob
+  // ids), then the full id as a movie — probing with the unsplit id first lets
+  // a plugin "successfully" load garbage for the suffix and win the probe.
+  const m = /^(.*):(\d+):(\d+)$/.exec(id);
+  if (m) {
+    const metaId = m[1];
+    const season = +m[2];
+    const episode = +m[3];
+    let p = pluginForId(metaId, pool);
+    if (!p) p = await probePluginForId(metaId, pool);
+    if (p) {
+      const raw = await resolveStreams(p, metaId, season, episode);
+      if (raw.length) return sendStreams(res, raw, base, p.name);
+    }
+  }
+  // full-id interpretation: a movie, or an id that genuinely ends in
+  // :digits:digits (rare) — the split above failed to produce streams
+  let plugin = pluginForId(id, pool);
+  if (!plugin) plugin = await probePluginForId(id, pool);
+  if (plugin) {
+    const raw = await resolveStreams(plugin, id, null, null);
+    if (raw.length) return sendStreams(res, raw, base, plugin.name);
+  }
+  return sendJson(res, 404, { error: "no streams found" });
+}
 
-  // no stream cache on purpose: plugins hand out short-lived signed URLs
-  // (e.g. moviblast verify= tokens), so mint fresh on every request
-  const raw = await resolveStreams(plugin, metaId, season, episode);
-  if (!raw.length) return sendJson(res, 404, { error: "no streams found" });
+function sendStreams(res, raw, base, pluginName) {
   sendJson(res, 200, {
     streams: raw
       .filter((s) => s && s.url)
-      .map((s) => mapStream(s, base, plugin.name)),
+      .map((s) => mapStream(s, base, pluginName)),
   });
 }
 
@@ -1224,6 +1477,10 @@ function isPrivateIp(ip) {
     return true;
   if (/^172\.(1[6-9]|2\d|3[01])\./.test(ip)) return true;
   if (/^169\.254\./.test(ip)) return true; // link-local incl. cloud metadata
+  if (/^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(ip)) return true; // CGNAT
+  if (/^198\.(18|19)\./.test(ip)) return true; // benchmarking
+  if (/^192\.0\.0\./.test(ip) || /^192\.0\.2\./.test(ip)) return true;
+  if (/^198\.51\.100\./.test(ip) || /^203\.0\.113\./.test(ip)) return true;
   if (/^fe80:/i.test(ip) || /^f[cd]/i.test(ip)) return true;
   return false;
 }
@@ -1308,7 +1565,12 @@ async function proxyFetch(url, extraHeaders, req, res) {
 }
 
 async function handleProxy(req, res, payloadPath) {
-  const payload = decodeURIComponent(payloadPath);
+  let payload;
+  try {
+    payload = decodeURIComponent(payloadPath);
+  } catch (e) {
+    return sendJson(res, 400, { error: "bad proxy payload" });
+  }
   let decoded;
   try {
     decoded = Buffer.from(payload, "base64url").toString("utf8");
@@ -1330,11 +1592,11 @@ async function handleProxy(req, res, payloadPath) {
           line.startsWith("MAGIC_PROXY_v1")
         )
           return (
-            base + "/proxy/" + Buffer.from(line.slice(15)).toString("base64url")
+            base + "/proxy/" + Buffer.from(line.slice(14)).toString("base64url")
           );
         if (line.startsWith("MAGIC_PROXY:"))
           return (
-            base + "/proxy/" + Buffer.from(line.slice(11)).toString("base64url")
+            base + "/proxy/" + Buffer.from(line.slice(12)).toString("base64url")
           );
         return line;
       })
@@ -1395,14 +1657,15 @@ function serveStatic(req, res, url) {
   res.writeHead(200, {
     "Content-Type": entry.type,
     "Cache-Control": "no-cache",
+    "X-Content-Type-Options": "nosniff",
+    "Content-Security-Policy":
+      "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self'",
   });
   res.end(fs.readFileSync(file));
   return true;
 }
 
 // ---------- router ----------
-
-const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
 const server = http.createServer(async (req, res) => {
   const url = req.url.split("?")[0];
@@ -1516,13 +1779,7 @@ const server = http.createServer(async (req, res) => {
         );
       const metaM = /^\/meta\/(movie|series)\/(.+)\.json$/.exec(rest);
       if (metaM)
-        return handleMeta(
-          req,
-          res,
-          metaM[1],
-          decodeId(metaM[2]),
-          pool,
-        );
+        return handleMeta(req, res, metaM[1], decodeId(metaM[2]), pool);
       const streamM = /^\/stream\/(movie|series)\/(.+)\.json$/.exec(rest);
       if (streamM)
         return handleStream(
@@ -1541,7 +1798,9 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, manifest(globalPool, req));
     const proxyM = /^\/proxy\/(.+)$/.exec(url);
     if (proxyM) return handleProxy(req, res, proxyM[1]);
-    const catM = /^\/catalog\/(movie|series)\/([^/]+)\.json$/.exec(url);
+    const catM = /^\/catalog\/(movie|series)\/([^/]+)(?:\/[^/]+)?\.json$/.exec(
+      url,
+    );
     if (catM)
       return handleCatalog(
         req,
@@ -1553,13 +1812,7 @@ const server = http.createServer(async (req, res) => {
       );
     const metaM = /^\/meta\/(movie|series)\/(.+)\.json$/.exec(url);
     if (metaM)
-      return handleMeta(
-        req,
-        res,
-        metaM[1],
-        decodeId(metaM[2]),
-        globalPool,
-      );
+      return handleMeta(req, res, metaM[1], decodeId(metaM[2]), globalPool);
     const streamM = /^\/stream\/(movie|series)\/(.+)\.json$/.exec(url);
     if (streamM)
       return handleStream(

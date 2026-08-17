@@ -77,6 +77,15 @@
     );
   }
 
+  function slugify(s) {
+    return (
+      String(s)
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "_")
+        .replace(/^_+|_+$/g, "") || "home"
+    );
+  }
+
   function stremioInstallUrl(addonUrl) {
     return "stremio://" + addonUrl.replace(/^https?:\/\//, "");
   }
@@ -209,7 +218,9 @@
         status: rp.status,
         error: rp.error,
         catalogs: rp.catalogs,
-        url: rp.url,
+        // the plugin's own addon URL — the server auto-installs it on first
+        // access, so this link works in Stremio right away
+        url: location.origin + "/" + slugify(rp.name) + "/manifest.json",
         isRepo: true,
         installUrl: rp.url,
       });

@@ -948,6 +948,10 @@ function handleListPlugins(req, res) {
 
 let bundles = []; // {id, pluginIds, createdAt}
 
+// repo plugins registered by the client (POST /api/repos): slug -> {url, name}
+// ponytail: in-memory only, lost on restart — repos re-register on page load
+const repoPlugins = new Map();
+
 function loadBundles() {
   try {
     bundles = JSON.parse(fs.readFileSync(BUNDLES_FILE, "utf8"));
@@ -1214,9 +1218,14 @@ async function handleListRepo(req, res) {
   const url = body && typeof body.url === "string" ? body.url.trim() : "";
   if (!url) return sendJson(res, 400, { error: "missing url" });
   try {
-    // bundle URLs are only generated from the selection generator — repo
-    // cards show the plugin's own URL; the addon URL appears on install
-    sendJson(res, 200, await fetchRepoPlugins(url));
+    const list = await fetchRepoPlugins(url);
+    // remember repo plugins so their predicted per-plugin addon URLs
+    // (/<slug>/manifest.json) auto-install on first access — the card shows
+    // that URL, not the raw .sky build link
+    for (const p of list.plugins) {
+      repoPlugins.set(slugify(p.name), { url: p.url, name: p.name });
+    }
+    sendJson(res, 200, list);
   } catch (e) {
     sendJson(res, 400, { error: e.message });
   }
@@ -1772,6 +1781,18 @@ const server = http.createServer(async (req, res) => {
 
     // ---- per-plugin addon URLs: /<id>/<route> ----
     const pluginM = /^\/([A-Za-z0-9_-]{1,64})\/(.+)$/.exec(url);
+    if (pluginM && !plugins.has(pluginM[1])) {
+      // repo-listed plugin not installed yet: auto-install on first access
+      // so the predicted addon URL (/<slug>/manifest.json) works as-is
+      const rp = repoPlugins.get(pluginM[1]);
+      if (rp) {
+        try {
+          await installPluginFromUrl(rp.url);
+        } catch (e) {
+          console.warn("auto-install skip", rp.url, "-", e.message);
+        }
+      }
+    }
     if (pluginM && plugins.has(pluginM[1])) {
       const id = pluginM[1];
       const rest = "/" + pluginM[2];

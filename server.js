@@ -281,15 +281,21 @@ function itemPoster(item) {
 }
 
 function mapItem(item) {
+  let type = mapType(item.type);
+  // same single-episode rule as mapMeta: a "series" with exactly one episode
+  // is a movie (single-episode VOD); no episodes at all stays series
+  const episodes = Array.isArray(item.episodes) ? item.episodes : [];
+  if (type === "series" && episodes.length === 1) type = "movie";
   return {
     id: item.url,
-    type: mapType(item.type),
+    type,
     name: itemName(item),
     poster: itemPoster(item),
-    background: item.bannerUrl || item.backgroundPosterUrl,
-    description: item.description,
-    releaseInfo: item.year ? String(item.year) : undefined,
-    imdbRating: item.score != null ? String(item.score) : undefined,
+    background: item.bannerUrl || item.backgroundPosterUrl || "",
+    logo: item.logoUrl || "",
+    description: item.description || "",
+    releaseInfo: item.year ? String(item.year) : "",
+    imdbRating: item.score != null ? String(item.score) : "",
   };
 }
 
@@ -314,6 +320,22 @@ function epNumbers(ep, i) {
   };
 }
 
+// Stremio's strict core (web/Android TV/Samsung/LG) requires `released` to be
+// a valid RFC3339 date — a bare year ("2024"), "15.01.2024", or a number
+// REJECTS the entire meta response (ERR_NO_META_FOUND, details page blank).
+// Normalize to ISO or omit entirely.
+function normalizeReleased(v) {
+  if (v === undefined || v === null || v === "") return undefined;
+  if (typeof v === "number") {
+    const d = new Date(v);
+    return isNaN(d) ? undefined : d.toISOString();
+  }
+  const s = String(v).trim();
+  if (/^\d{4}$/.test(s)) return s + "-01-01T00:00:00.000Z"; // bare year
+  const d = new Date(s);
+  return isNaN(d.getTime()) ? undefined : d.toISOString();
+}
+
 function mapMeta(item) {
   let type = mapType(item.type);
   const episodes = Array.isArray(item.episodes) ? item.episodes : [];
@@ -331,30 +353,51 @@ function mapMeta(item) {
       // embed the meta id (item.url): /stream/<type>/<metaId>:<s>:<e>.json.
       // A synthetic id like "e1x1" makes Stremio request /stream/.../e1x1.json
       // which no plugin owns -> "no streams" even though the plugin works.
+      // Movies keep a plain id (no :s:e, no season/episode fields) so Stremio
+      // renders them as movies, not as S01E01 of a series.
+      const isMovie = type === "movie";
       return {
-        id: item.url + ":" + n.season + ":" + n.episode,
-        title: ep.name || "Episode " + n.episode,
-        season: n.season,
-        episode: n.episode,
-        released: ep.airDate,
+        id: isMovie ? item.url : item.url + ":" + n.season + ":" + n.episode,
+        title: ep.name || (isMovie ? "Play" : "Episode " + n.episode),
+        ...(isMovie ? {} : { season: n.season, episode: n.episode }),
+        released: normalizeReleased(ep.airDate),
         thumbnail: ep.posterUrl,
         overview: ep.description,
       };
     })
     .sort((a, b) => a.season - b.season || a.episode - b.episode);
+  // plugins may return streams directly without episodes — still give Stremio
+  // one playable video so the detail page loads and streams resolve
+  if (!videos.length && Array.isArray(item.streams) && item.streams.length) {
+    videos.push({
+      id: item.url,
+      title: "Play",
+      released: normalizeReleased(item.year),
+      thumbnail: itemPoster(item),
+      overview: item.description,
+    });
+  }
   return {
     id: item.url,
     type,
     name: itemName(item),
     poster: itemPoster(item),
-    background: item.bannerUrl || item.backgroundPosterUrl,
-    logo: item.logoUrl,
-    description: item.description,
-    releaseInfo: item.year ? String(item.year) : undefined,
-    imdbRating: item.score != null ? String(item.score) : undefined,
+    background: item.bannerUrl || item.backgroundPosterUrl || "",
+    logo: item.logoUrl || "",
+    description: item.description || "",
+    releaseInfo: item.year ? String(item.year) : "",
+    imdbRating: item.score != null ? String(item.score) : "",
+    // pass through the plugin's own imdb id when it has one; when absent,
+    // Stremio uses our meta as-is instead of merging Cinemeta (which would
+    // 404 for non-imdb ids and blank the detail page)
+    imdb_id: item.imdbId || item.imdb_id || undefined,
     genres: item.tags || [],
     cast: mapCast(item),
     videos,
+    // movies: deep link straight to streams (skip the "Play" row tap)
+    ...(type === "movie"
+      ? { behaviorHints: { defaultVideoId: item.url } }
+      : {}),
   };
 }
 
@@ -1056,7 +1099,12 @@ async function resolveStreams(plugin, metaId, season, episode) {
 }
 
 async function handleStream(req, res, type, id, pool, base) {
-  const m = /^(.*):(\d+):(\d+)$/.exec(id);
+  // only split :s:e off http(s) ids — a URL ending in :digits:digits (rare
+  // but possible) must not be misparsed as a series episode
+  const m =
+    id.startsWith("http") && /^(.*):(\d+):(\d+)$/.exec(id)
+      ? /^(.*):(\d+):(\d+)$/.exec(id)
+      : null;
   const metaId = m ? m[1] : id;
   const season = m ? +m[2] : null;
   const episode = m ? +m[3] : null;

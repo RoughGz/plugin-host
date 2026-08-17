@@ -593,6 +593,42 @@ body {
   background: var(--bg-soft);
   border-color: var(--border);
 }
+.chip-sm {
+  font-size: 10px;
+  padding: 2px 7px;
+}
+
+.sel-preview {
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 14px;
+  margin-top: 10px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.sel-preview-head {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  margin-bottom: 8px;
+}
+.sel-preview-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 0;
+  font-size: 13px;
+}
+.sel-preview-row strong {
+  white-space: nowrap;
+  min-width: 130px;
+}
+.sel-preview-row .chips {
+  max-height: none;
+}
 
 .url-row {
   display: flex;

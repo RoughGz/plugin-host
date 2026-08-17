@@ -200,6 +200,31 @@
       selected.size +
       (selected.size === 1 ? " plugin selected" : " plugins selected");
     makeBundle.disabled = selected.size === 0;
+    // live preview: selected plugins and their catalogs, real-time
+    const selPreview = $("#selPreview");
+    if (!selected.size) {
+      selPreview.hidden = true;
+      selPreview.innerHTML = "";
+      return;
+    }
+    const info = (key) =>
+      key.startsWith("repo:")
+        ? repoPluginList.find((p) => p.url === key.slice(5))
+        : lastPlugins.find((p) => p.id === key);
+    selPreview.innerHTML =
+      "<div class='sel-preview-head'>Bundle preview — live catalogs</div>" +
+      [...selected]
+        .map((key) => {
+          const p = info(key);
+          if (!p) return "";
+          const cats = (p.catalogs || [])
+            .slice(0, 8)
+            .map((c) => `<span class="chip chip-sm">${esc(c.name)}</span>`)
+            .join("");
+          return `<div class="sel-preview-row"><strong>${esc(p.name)}</strong><span class="chips">${cats || '<span class="chip chip-muted">no catalogs</span>'}</span></div>`;
+        })
+        .join("");
+    selPreview.hidden = false;
   }
 
   async function createBundle() {
@@ -477,13 +502,25 @@
   }
 
   async function resetAll() {
+    // wipe everything: installed plugins, selection, repo list — fresh start
+    const ids = lastPlugins.map((p) => p.id);
+    const del = ids.map((id) =>
+      fetch(`/api/plugins/${encodeURIComponent(id)}`, {
+        method: "DELETE",
+      }).then((r) => r.ok),
+    );
+    await Promise.allSettled(del);
     selected.clear();
     repoPluginList = [];
     repoInfo.hidden = true;
     lastJson = "";
     updateSelBar();
     await load();
-    toast("Reset \u2014 back to installed plugins");
+    toast(
+      ids.length
+        ? "Reset \u2014 all plugins removed"
+        : "Reset \u2014 fresh start",
+    );
   }
 
   grid.addEventListener("click", (e) => {

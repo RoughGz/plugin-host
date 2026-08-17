@@ -475,30 +475,34 @@ async function loadFromState() {
   for (const p of plugins.values()) if (p.runtime) p.runtime.destroy();
   plugins.clear();
   globalPool.prefixMap.clear();
-  for (const entry of state) {
-    try {
-      const { name, code, descriptor } = entry.url.endsWith(".sky")
-        ? await fetchPluginSourceFromSky(entry.url, entry.name || "")
-        : await fetchPluginSource(entry.url);
-      const plugin = makePlugin(entry.id, name, code, descriptor);
-      writePluginFiles(plugin, code, descriptor);
-      plugins.set(entry.id, plugin);
-      console.log("loaded plugin:", entry.id);
-    } catch (e) {
-      console.warn("plugin", entry.id, "failed to load:", e.message);
-      plugins.set(entry.id, {
-        id: entry.id,
-        name: entry.name,
-        descriptor: {},
-        sections: new Map(),
-        sectionsTs: 0,
-        metaCache: new Map(),
-        status: "error",
-        error: e.message,
-        runtime: null,
-      });
-    }
-  }
+  // parallel: plugins are independent; sequential 15s timeouts would stall
+  // boot for minutes when an upstream is down
+  await Promise.all(
+    state.map(async (entry) => {
+      try {
+        const { name, code, descriptor } = entry.url.endsWith(".sky")
+          ? await fetchPluginSourceFromSky(entry.url, entry.name || "")
+          : await fetchPluginSource(entry.url);
+        const plugin = makePlugin(entry.id, name, code, descriptor);
+        writePluginFiles(plugin, code, descriptor);
+        plugins.set(entry.id, plugin);
+        console.log("loaded plugin:", entry.id);
+      } catch (e) {
+        console.warn("plugin", entry.id, "failed to load:", e.message);
+        plugins.set(entry.id, {
+          id: entry.id,
+          name: entry.name,
+          descriptor: {},
+          sections: new Map(),
+          sectionsTs: 0,
+          metaCache: new Map(),
+          status: "error",
+          error: e.message,
+          runtime: null,
+        });
+      }
+    }),
+  );
   // dev/test: plugin dirs not managed by state (hot reload picks them up)
   for (const entry of fs.readdirSync(PLUGINS_DIR, { withFileTypes: true })) {
     if (!entry.isDirectory() || plugins.has(entry.name)) continue;
@@ -883,26 +887,28 @@ function serveBundleDispatch(req, res, pool, manifestId, rest, query) {
     return sendJson(res, 200, manifest(pool, req, manifestId));
   const proxyM = /^\/proxy\/(.+)$/.exec(rest);
   if (proxyM) return handleProxy(req, res, proxyM[1]);
-  const catM = /^\/catalog\/(movie|series)\/([^/]+)(?:\/[^/]+)?\.json$/.exec(rest);
+  const catM = /^\/catalog\/(movie|series)\/([^/]+)(?:\/[^/]+)?\.json$/.exec(
+    rest,
+  );
   if (catM)
     return handleCatalog(
       req,
       res,
       catM[1],
-      decodeURIComponent(catM[2]),
+      decodeId(catM[2]),
       (query || new URLSearchParams()).get("search"),
       pool,
     );
-  const metaM = /^\/meta\/(movie|series)\/([^/]+)\.json$/.exec(rest);
+  const metaM = /^\/meta\/(movie|series)\/(.+)\.json$/.exec(rest);
   if (metaM)
-    return handleMeta(req, res, metaM[1], decodeURIComponent(metaM[2]), pool);
-  const streamM = /^\/stream\/(movie|series)\/([^/]+)\.json$/.exec(rest);
+    return handleMeta(req, res, metaM[1], decodeId(metaM[2]), pool);
+  const streamM = /^\/stream\/(movie|series)\/(.+)\.json$/.exec(rest);
   if (streamM)
     return handleStream(
       req,
       res,
       streamM[1],
-      decodeURIComponent(streamM[2]),
+      decodeId(streamM[2]),
       pool,
       publicBase(req),
     );
@@ -1126,6 +1132,16 @@ async function handleCatalog(req, res, type, catalogId, search, pool) {
   }
   sendJson(res, 200, { metas: items.map(mapItem).filter((m) => m.id) });
 }
+
+// ids travel encoded, sometimes double-encoded (proxies re-encode); canonicalize
+function decodeId(raw) {
+  let id = decodeURIComponent(raw);
+  while (/%[0-9a-fA-F]{2}/.test(id)) {
+    try { const d = decodeURIComponent(id); if (d === id) break; id = d; } catch (e) { break; }
+  }
+  return id;
+}
+
 
 async function handleMeta(req, res, type, id, pool) {
   let plugin = pluginForId(id, pool);
@@ -1487,32 +1503,33 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 200, manifest(pool, req));
       const proxyM = /^\/proxy\/(.+)$/.exec(rest);
       if (proxyM) return handleProxy(req, res, proxyM[1]);
-      const catM = /^\/catalog\/(movie|series)\/([^/]+)(?:\/[^/]+)?\.json$/.exec(rest);
+      const catM =
+        /^\/catalog\/(movie|series)\/([^/]+)(?:\/[^/]+)?\.json$/.exec(rest);
       if (catM)
         return handleCatalog(
           req,
           res,
           catM[1],
-          decodeURIComponent(catM[2]),
+          decodeId(catM[2]),
           query.get("search"),
           pool,
         );
-      const metaM = /^\/meta\/(movie|series)\/([^/]+)\.json$/.exec(rest);
+      const metaM = /^\/meta\/(movie|series)\/(.+)\.json$/.exec(rest);
       if (metaM)
         return handleMeta(
           req,
           res,
           metaM[1],
-          decodeURIComponent(metaM[2]),
+          decodeId(metaM[2]),
           pool,
         );
-      const streamM = /^\/stream\/(movie|series)\/([^/]+)\.json$/.exec(rest);
+      const streamM = /^\/stream\/(movie|series)\/(.+)\.json$/.exec(rest);
       if (streamM)
         return handleStream(
           req,
           res,
           streamM[1],
-          decodeURIComponent(streamM[2]),
+          decodeId(streamM[2]),
           pool,
           base,
         );
@@ -1530,26 +1547,26 @@ const server = http.createServer(async (req, res) => {
         req,
         res,
         catM[1],
-        decodeURIComponent(catM[2]),
+        decodeId(catM[2]),
         query.get("search"),
         globalPool,
       );
-    const metaM = /^\/meta\/(movie|series)\/([^/]+)\.json$/.exec(url);
+    const metaM = /^\/meta\/(movie|series)\/(.+)\.json$/.exec(url);
     if (metaM)
       return handleMeta(
         req,
         res,
         metaM[1],
-        decodeURIComponent(metaM[2]),
+        decodeId(metaM[2]),
         globalPool,
       );
-    const streamM = /^\/stream\/(movie|series)\/([^/]+)\.json$/.exec(url);
+    const streamM = /^\/stream\/(movie|series)\/(.+)\.json$/.exec(url);
     if (streamM)
       return handleStream(
         req,
         res,
         streamM[1],
-        decodeURIComponent(streamM[2]),
+        decodeId(streamM[2]),
         globalPool,
         publicBase(req),
       );

@@ -14,7 +14,6 @@
   const addBtn = $("#addBtn");
   const addError = $("#addError");
   const toasts = $("#toasts");
-  const selBar = $("#selBar");
   const selCount = $("#selCount");
   const selectAllBtn = $("#selectAll");
   const removeAllBtn = $("#removeAll");

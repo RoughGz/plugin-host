@@ -586,6 +586,144 @@ async function main() {
     } catch (e) {
       warn("dashboard API flow: " + e.message);
     }
+    // ----- deterministic coverage of otherwise-untested paths (no network) -----
+    console.log("hardening checks:");
+    // /proxy/ SSRF: loopback, IPv6 literal, metadata — all must be refused
+    for (const bad of [
+      "http://127.0.0.1:3999/manifest.json",
+      "http://[::1]:3999/manifest.json",
+      "http://[::ffff:127.0.0.1]:3999/manifest.json",
+      "http://169.254.169.254/latest/meta-data/",
+      "http://localhost:3999/manifest.json",
+    ]) {
+      const enc = Buffer.from(bad).toString("base64url");
+      const r = await fetch(base + "/proxy/" + enc, {
+        signal: AbortSignal.timeout(10000),
+      }).catch(() => null);
+      const body = r ? await r.json().catch(() => ({})) : {};
+      check(
+        "proxy blocks " + bad.slice(0, 40),
+        r && r.status === 502 && /blocked/.test(body.error || ""),
+        r ? r.status + " " + (body.error || "") : "fetch failed",
+      );
+    }
+    // proxy passes a public URL through (may fail to connect here → still 502,
+    // but must NOT be "blocked host")
+    {
+      const enc = Buffer.from("https://new1.vegamovies.futbol/").toString(
+        "base64url",
+      );
+      const r = await fetch(base + "/proxy/" + enc, {
+        signal: AbortSignal.timeout(20000),
+      }).catch(() => null);
+      check(
+        "proxy allows public host",
+        r && r.status !== 502,
+        "status " + (r && r.status),
+      );
+    }
+    // magic-URL m3u8 rewrite: MAGIC_PROXY_v2 lines become /proxy/ URLs
+    {
+      const m3u =
+        "#EXTM3U\nMAGIC_PROXY_v2" +
+        Buffer.from("https://cdn.example/seg.mp4").toString("base64url");
+      const enc = Buffer.from(m3u).toString("base64url");
+      const r = await fetch(base + "/proxy/" + enc, {
+        signal: AbortSignal.timeout(10000),
+      });
+      const txt = await r.text();
+      check(
+        "magic m3u8 lines rewritten to proxy",
+        r.status === 200 &&
+          txt.includes("/proxy/") &&
+          !txt.includes("MAGIC_PROXY_v2"),
+        txt.slice(0, 120),
+      );
+    }
+    // split-id series stream: <metaId>:1:1 → episodes[0] → loadStreams
+    {
+      const r = await fetch(
+        base +
+          "/stream/series/" +
+          encodeURIComponent("https://x.test/1") +
+          ":1:1.json",
+        { signal: AbortSignal.timeout(15000) },
+      );
+      const j = await r.json().catch(() => ({}));
+      check(
+        "split-id series stream resolves",
+        r.status === 200 &&
+          Array.isArray(j.streams) &&
+          j.streams[0].url === "https://x.test/stream.mp4",
+        r.status + " " + JSON.stringify(j).slice(0, 100),
+      );
+    }
+    // catalog extras: skip=1 on a 1-item catalog must be empty, genre filter
+    // must narrow (item has no tags → everything filtered out)
+    {
+      const full = await getJson(base + "/catalog/movie/__test___leaks.json");
+      const skipped = await getJson(
+        base + "/catalog/movie/__test___leaks.json?skip=1",
+      );
+      const genre = await getJson(
+        base + "/catalog/movie/__test___leaks.json?genre=xyz",
+      );
+      check(
+        "skip pagination honored",
+        full.metas.length === 1 && skipped.metas.length === 0,
+        "full=" + full.metas.length + " skip=" + skipped.metas.length,
+      );
+      check(
+        "genre filter honored",
+        genre.metas.length === 0,
+        "genre=" + genre.metas.length,
+      );
+    }
+    // stateless bundle: urls form → encoded /bundle/auto/ URL → manifest works
+    // (bundle creation is local; serving it installs from GitHub — network)
+    {
+      const add = await fetch(base + "/api/bundles", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          urls: [
+            "https://github.com/likhithkrishna1103-tech/Hindmovie/tree/main/movies4u",
+          ],
+        }),
+      });
+      const d = await add.json();
+      check(
+        "stateless bundle created",
+        add.status === 201 && /\/bundle\/auto\//.test(d.bundle.url),
+        JSON.stringify(d).slice(0, 120),
+      );
+      if (add.status === 201) {
+        try {
+          const m = await getJson(d.bundle.url);
+          check(
+            "stateless bundle manifest serves",
+            Array.isArray(m.catalogs) && m.catalogs.length > 0,
+            JSON.stringify(m.catalogs).slice(0, 100),
+          );
+        } catch (e) {
+          warn("stateless bundle serve: " + e.message);
+        }
+      }
+    }
+    // bare imdb id mirrors Cinemeta (network — degrades to a warning)
+    try {
+      const r = await fetch(base + "/meta/movie/tt0111161.json", {
+        signal: AbortSignal.timeout(20000),
+      });
+      const j = await r.json().catch(() => ({}));
+      check(
+        "bare tt-id mirrors Cinemeta",
+        r.status === 200 && j.meta && j.meta.id === "tt0111161",
+        r.status + " " + JSON.stringify(j).slice(0, 80),
+      );
+    } catch (e) {
+      warn("bare tt-id mirror: " + e.message);
+    }
   } finally {
     server.kill();
     fs.rmSync(testDir, { recursive: true, force: true });

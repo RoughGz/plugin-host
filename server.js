@@ -1,9 +1,9 @@
 const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
-const dns = require("node:dns").promises;
 const crypto = require("node:crypto");
 const { Readable } = require("node:stream");
+const { isPrivateIp, isPrivateHost } = require("./lib/net-guard");
 const { PluginRuntime, callPlugin } = require("./lib/plugin-host");
 const {
   pluginNameFromUrl,
@@ -582,7 +582,6 @@ async function loadFromState() {
     plugins.set(entry.name, plugin);
     console.log("loaded dev plugin:", entry.name);
   }
-  return [...plugins.values()];
 }
 
 function writePluginFiles(plugin, code, descriptor) {
@@ -664,7 +663,6 @@ async function warmAll() {
       ),
     ),
   );
-  return catalogList(globalPool);
 }
 
 function rebuildPrefixMap(pool) {
@@ -1067,7 +1065,9 @@ async function handleAddBundle(req, res) {
   // stateless bundle: client passes manifest URLs; the returned URL encodes
   // them, so it survives deploys/state wipes (see /bundle/auto route)
   if (Array.isArray(body && body.urls)) {
-    const urls = body.urls.filter((u) => typeof u === "string" && u.trim());
+    const urls = body.urls
+      .filter((u) => typeof u === "string" && u.trim())
+      .slice(0, 20); // cap hostile payloads; bundles of 3-5 are the norm
     if (!urls.length) return sendJson(res, 400, { error: "no plugin urls" });
     const enc = Buffer.from(JSON.stringify(urls)).toString("base64url");
     return sendJson(res, 201, {
@@ -1084,7 +1084,7 @@ async function handleAddBundle(req, res) {
     : [];
   if (!ids.length) return sendJson(res, 400, { error: "no valid plugin ids" });
   const b = {
-    id: crypto.randomBytes(4).toString("hex"),
+    id: crypto.randomBytes(8).toString("hex"),
     pluginIds: ids,
     createdAt: Date.now(),
   };
@@ -1290,7 +1290,7 @@ function manifest(pool, req, idOverride) {
 }
 
 async function handleCatalog(req, res, type, catalogId, search, pool) {
-  const found = findCatalog(pool, catalogId);
+  let found = findCatalog(pool, catalogId);
   let items = [];
   const q = new URLSearchParams((req.url || "").split("?")[1] || "");
   const skip = Math.max(0, Number(q.get("skip")) || 0);
@@ -1354,7 +1354,10 @@ async function handleCatalog(req, res, type, catalogId, search, pool) {
 // ids travel encoded, sometimes double-encoded (proxies re-encode); canonicalize
 function decodeId(raw) {
   let id = decodeURIComponent(raw);
-  while (/%[0-9a-fA-F]{2}/.test(id)) {
+  // Nuvio (and some clients) send ids double-encoded — decode again only
+  // while it still isn't a usable URL; a decoded URL's own %-escapes (query
+  // strings in JSON-blob ids) must never be re-decoded
+  while (!id.includes("://") && /%[0-9a-fA-F]{2}/.test(id)) {
     try {
       const d = decodeURIComponent(id);
       if (d === id) break;
@@ -1501,6 +1504,14 @@ async function handleStream(req, res, type, id, pool, base) {
     const raw = await resolveStreams(plugin, id, null, null);
     if (raw.length) return sendStreams(res, raw, base, plugin.name);
   }
+  // empty is common when an upstream Cloudflare-challenges our datacenter IP
+  // and the plugin swallows the failure — log it so it's visible in server logs
+  console.warn(
+    "no streams for",
+    type,
+    id.slice(0, 120),
+    plugin ? "via " + plugin.name + " (empty result)" : "(no plugin matched)",
+  );
   return sendJson(res, 404, { error: "no streams found" });
 }
 
@@ -1514,35 +1525,8 @@ function sendStreams(res, raw, base, pluginName) {
 
 // ---------- magic-URL proxy ----------
 
-function isPrivateIp(ip) {
-  if (/^::ffff:/i.test(ip)) return true; // IPv4-mapped IPv6 (::ffff:127.0.0.1 etc.)
-  if (ip === "0.0.0.0" || ip === "::" || ip === "::1") return true;
-  if (/^127\./.test(ip) || /^10\./.test(ip) || /^192\.168\./.test(ip))
-    return true;
-  if (/^172\.(1[6-9]|2\d|3[01])\./.test(ip)) return true;
-  if (/^169\.254\./.test(ip)) return true; // link-local incl. cloud metadata
-  if (/^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(ip)) return true; // CGNAT
-  if (/^198\.(18|19)\./.test(ip)) return true; // benchmarking
-  if (/^192\.0\.0\./.test(ip) || /^192\.0\.2\./.test(ip)) return true;
-  if (/^198\.51\.100\./.test(ip) || /^203\.0\.113\./.test(ip)) return true;
-  if (/^fe80:/i.test(ip) || /^f[cd]/i.test(ip)) return true;
-  return false;
-}
-
-async function isPrivateHost(hostname) {
-  if (hostname === "localhost" || hostname.endsWith(".local")) return true;
-  if (/^\d+\.\d+\.\d+\.\d+$/.test(hostname) || hostname.includes(":"))
-    return isPrivateIp(hostname);
-  try {
-    const { address } = await dns.lookup(hostname);
-    return isPrivateIp(address);
-  } catch (e) {
-    return true; // unresolvable → refuse
-  }
-}
-
 // fetch with per-hop SSRF check and no silent cross-host redirects
-async function fetchSafe(url, headers, maxHops) {
+async function fetchSafe(url, headers, maxHops, signal) {
   maxHops = maxHops || 5;
   let cur = url;
   for (let i = 0; i < maxHops; i++) {
@@ -1555,7 +1539,7 @@ async function fetchSafe(url, headers, maxHops) {
     if (u.protocol !== "https:" && u.protocol !== "http:")
       throw new Error("bad scheme");
     if (await isPrivateHost(u.hostname)) throw new Error("blocked host");
-    const res = await fetch(cur, { headers, redirect: "manual" });
+    const res = await fetch(cur, { headers, redirect: "manual", signal });
     if (res.status >= 300 && res.status < 400) {
       const loc = res.headers.get("location");
       if (!loc) return res;
@@ -1575,16 +1559,25 @@ async function proxyFetch(url, extraHeaders, req, res) {
     headers["Accept-Encoding"] = "identity";
   if (req.headers.range) headers["Range"] = req.headers.range;
   const isHead = req.method === "HEAD";
+  const ctrl = new AbortController(); // bound streaming proxies; requestTimeout is the backstop
+  const timer = setTimeout(() => ctrl.abort(), 30000);
   try {
-    const upstream = await fetchSafe(url, {
-      ...headers,
-      method: isHead ? "HEAD" : "GET",
-    });
+    const upstream = await fetchSafe(
+      url,
+      {
+        ...headers,
+        method: isHead ? "HEAD" : "GET",
+      },
+      5,
+      ctrl.signal,
+    );
     const outHeaders = {
       "Content-Type":
         upstream.headers.get("content-type") || "application/octet-stream",
       "Cache-Control": "no-store",
       "Access-Control-Allow-Origin": "*",
+      "X-Content-Type-Options": "nosniff",
+      "Content-Security-Policy": "sandbox; default-src 'none'", // proxied bytes: never treat as page
     };
     // forward Content-Length only when the body wasn't decompressed
     const enc = upstream.headers.get("content-encoding");
@@ -1605,6 +1598,8 @@ async function proxyFetch(url, extraHeaders, req, res) {
     if (!res.headersSent)
       sendJson(res, 502, { error: "proxy fetch failed: " + e.message });
     else res.end();
+  } finally {
+    clearTimeout(timer);
   }
 }
 

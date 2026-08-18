@@ -34,9 +34,6 @@
   let repoPluginList = [];
   let lastJson = "";
 
-  function api(path, opts = {}) {
-    return fetch(path, opts);
-  }
 
   function toast(msg, kind = "ok") {
     const el = document.createElement("div");
@@ -89,7 +86,6 @@
     return "stremio://" + addonUrl.replace(/^https?:\/\//, "");
   }
 
-  // shared card body for installed and repo plugins; key is the selection key
   function cardHtml({
     key,
     name,
@@ -237,7 +233,6 @@
       (selected.size === 1 ? " plugin selected" : " plugins selected");
     makeBundle.disabled = selected.size === 0;
     updateStats();
-    // live preview: selected plugins and their catalogs, real-time
     const selPreview = $("#selPreview");
     if (!selected.size) {
       selPreview.hidden = true;
@@ -322,7 +317,7 @@
   }
 
   async function loadBundles() {
-    const res = await api("api/bundles");
+    const res = await fetch("api/bundles");
     if (!res.ok) return;
     const data = await res.json();
     renderBundles(data.bundles || []);
@@ -331,7 +326,7 @@
   async function deleteBundle(id) {
     if (!confirm("Delete this bundle? Its addon URL will stop working."))
       return;
-    const res = await api("api/bundles/" + encodeURIComponent(id), {
+    const res = await fetch("api/bundles/" + encodeURIComponent(id), {
       method: "DELETE",
     });
     if (!res.ok) {
@@ -344,7 +339,7 @@
   }
 
   async function load() {
-    const res = await api("api/plugins");
+    const res = await fetch("api/plugins");
     if (!res.ok) throw new Error("HTTP " + res.status);
     const data = await res.json();
     const json = JSON.stringify(data.plugins || []);
@@ -359,7 +354,7 @@
     addBtn.querySelector(".spinner").hidden = false;
     addError.hidden = true;
     try {
-      const res = await api("api/plugins", {
+      const res = await fetch("api/plugins", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url }),
@@ -382,7 +377,7 @@
   async function removePlugin(id, name) {
     if (!confirm('Remove "' + name + '"? Its addon URL will stop working.'))
       return;
-    const res = await api("api/plugins/" + encodeURIComponent(id), {
+    const res = await fetch("api/plugins/" + encodeURIComponent(id), {
       method: "DELETE",
     });
     if (!res.ok) {
@@ -446,7 +441,7 @@
     addBtn.querySelector(".spinner").hidden = false;
     addError.hidden = true;
     try {
-      const res = await api("api/repos", {
+      const res = await fetch("api/repos", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url }),
@@ -480,7 +475,7 @@
       // every repo plugin is installed so its categories show up right away
       const poll = setInterval(async () => {
         try {
-          const r = await api("api/plugins");
+          const r = await fetch("api/plugins");
           const installed = (await r.json()).plugins || [];
           if (list.every((rp) => installed.some((p) => p.url === rp.url)))
             clearInterval(poll);
@@ -506,7 +501,7 @@
   // plugin's REAL addon URL (the repo entry only points at the raw build file)
   async function installRepoPlugin(url, name) {
     try {
-      const res = await api("api/plugins", {
+      const res = await fetch("api/plugins", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url, name }),
@@ -556,14 +551,13 @@
     }
   }
 
-  // Remove from the repo list; uninstall too if it was installed
   async function removeRepoPlugin(url, name) {
     if (!confirm('Remove "' + name + '" from the repository list?')) return;
     repoPluginList = repoPluginList.filter((p) => p.url !== url);
     selected.delete("repo:" + url);
     const installed = lastPlugins.find((p) => p.url === url);
     if (installed) {
-      await api("api/plugins/" + encodeURIComponent(installed.id), {
+      await fetch("api/plugins/" + encodeURIComponent(installed.id), {
         method: "DELETE",
       });
       toast("Removed " + name);
@@ -586,7 +580,6 @@
   }
 
   async function resetAll() {
-    // wipe everything: installed plugins, selection, repo list — fresh start
     resetBtn.disabled = true;
     try {
       const ids = lastPlugins.map((p) => p.id);

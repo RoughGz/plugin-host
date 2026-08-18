@@ -315,7 +315,6 @@ async function main() {
       "got: " + manifest2.catalogs.map((c) => c.id).join(", "),
     );
 
-    // sandbox isolation: process/require/fs must be invisible
     const cat = await getJson(base + "/catalog/movie/__test___leaks.json");
     const first = (cat.metas || [])[0] || {};
     check(
@@ -345,7 +344,6 @@ async function main() {
       JSON.stringify(first.name),
     );
 
-    // meta + stream round-trip on the isolation plugin
     const meta = await getJson(
       base + "/meta/movie/" + encodeURIComponent("https://x.test/1") + ".json",
     );

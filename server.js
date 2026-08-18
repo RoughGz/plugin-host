@@ -3,7 +3,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { Readable } = require("node:stream");
-const { isPrivateIp, isPrivateHost } = require("./lib/net-guard");
+const { isPrivateHost } = require("./lib/net-guard");
 const { PluginRuntime, callPlugin } = require("./lib/plugin-host");
 const {
   pluginNameFromUrl,
@@ -41,7 +41,7 @@ try {
 // Dashboard-managed runtime state. When GITHUB_TOKEN is set it's mirrored to
 // the repo's `state` branch and restored at boot — Render free tier wipes the
 // filesystem on redeploy and idle spin-down.
-let state = []; // [{id, name, url, addedAt}]
+let state = [];
 
 const GITHUB_REPO = process.env.GITHUB_REPO || config.githubRepo || "";
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN || "";
@@ -491,8 +491,6 @@ function filenameFromUrl(u) {
 
 // ---------- plugin loading ----------
 
-// Load state entries (fetch source, install, spawn runtime) plus any
-// dev/test plugin dirs dropped into plugins/ by hand.
 async function loadFromState() {
   for (const p of plugins.values()) if (p.runtime) p.runtime.destroy();
   plugins.clear();
@@ -548,9 +546,7 @@ async function loadFromState() {
           "utf8",
         ),
       );
-    } catch (e) {
-      // plugin.json optional
-    }
+    } catch (e) {}
     const plugin = makePlugin(
       entry.name,
       entry.name,
@@ -566,12 +562,14 @@ async function loadFromState() {
 function writePluginFiles(plugin, code, descriptor) {
   plugin.dir = path.join(PLUGINS_DIR, plugin.id);
   fs.mkdirSync(plugin.dir, { recursive: true });
-  fs.writeFileSync(path.join(plugin.dir, "plugin.js"), code);
-  if (descriptor && Object.keys(descriptor).length)
-    fs.writeFileSync(
-      path.join(plugin.dir, "plugin.json"),
-      JSON.stringify(descriptor, null, 2),
-    );
+  const jsPath = path.join(plugin.dir, "plugin.js");
+  fs.writeFileSync(jsPath, code);
+  const jsonPath = path.join(plugin.dir, "plugin.json");
+  if (descriptor && Object.keys(descriptor).length) {
+    fs.writeFileSync(jsonPath, JSON.stringify(descriptor, null, 2));
+    selfWritten.add(jsonPath);
+  }
+  selfWritten.add(jsPath);
   lastSelfWrite = Date.now(); // management-API writes manage state directly — no hot reload
 }
 
@@ -891,9 +889,6 @@ async function getRawItem(plugin, metaId, timeoutMs) {
     cachePut(plugin.metaCache, metaId, Date.now(), null, NEGATIVE_TTL_MS);
     return null;
   }
-  // SkyStream parity: plugins may omit `url` in load() results — backfill it
-  // with the requested URL (movie playback depends on this)
-  if (!res.data.url) res.data.url = metaId;
   return res.data;
 }
 
@@ -1026,7 +1021,6 @@ function saveBundles() {
   fs.writeFileSync(BUNDLES_FILE, JSON.stringify(bundles, null, 2));
 }
 
-// drop bundles whose plugins no longer exist (and dead ids inside survivors)
 function pruneBundles() {
   for (const b of bundles)
     b.pluginIds = b.pluginIds.filter((x) => plugins.has(x));
@@ -1052,7 +1046,6 @@ function autoBundleId(urls) {
     .slice(0, 8);
 }
 
-// shared dispatch for stateful (id-based) and stateless (url-encoded) bundles
 function serveBundleDispatch(req, res, pool, manifestId, rest, query) {
   if (rest === "/manifest.json")
     return sendJson(res, 200, manifest(pool, req, manifestId));
@@ -1067,7 +1060,7 @@ function serveBundleDispatch(req, res, pool, manifestId, rest, query) {
       res,
       catM[1],
       decodeId(catM[2]),
-      (query || new URLSearchParams()).get("search"),
+      query.get("search"),
       pool,
     );
   const metaM = /^\/meta\/(movie|series)\/(.+)\.json$/.exec(rest);
@@ -1155,7 +1148,6 @@ function handleDeleteBundle(req, res, id) {
   sendJson(res, 200, { ok: true });
 }
 
-// POST /api/plugins {url} — fetch + install a plugin, return its addon URL
 // install a plugin from its manifest url (idempotent: reuses the installed
 // entry when present). Shared by POST /api/plugins and stateless bundles.
 const installing = new Map(); // url -> Promise<id>, single-flight per url
@@ -1278,8 +1270,8 @@ async function handleAddPlugin(req, res) {
   sendJson(res, 201, { plugin: publicPlugin(entry, req) });
 }
 
-// POST /api/repos {url} — fetch a SkyStream repo.json and list its plugins
-// (does NOT install anything; the client picks what to add)
+// POST /api/repos {url} — fetch a SkyStream repo.json, register its slugs,
+// and install+warm its plugins in the background (categories ready on tap)
 async function handleListRepo(req, res) {
   let body;
   try {
@@ -1303,20 +1295,20 @@ async function handleListRepo(req, res) {
     // /api/plugins and re-renders as each plugin comes up
     Promise.allSettled(
       list.plugins.map((p) => installPluginFromUrl(p.url, p.name)),
-    ).catch(() => {});
+    );
     sendJson(res, 200, list);
   } catch (e) {
     sendJson(res, 400, { error: e.message });
   }
 }
 
-// DELETE /api/plugins/:id — stop the runtime, drop the files, forget it
 function handleDeletePlugin(req, res, id) {
   const idx = state.findIndex((e) => e.id === id);
   if (idx < 0) return sendJson(res, 404, { error: "plugin not found" });
   const plugin = plugins.get(id);
   if (plugin && plugin.runtime) plugin.runtime.destroy();
   plugins.delete(id);
+  lastSelfWrite = Date.now(); // management-API writes manage state directly — no hot reload
   fs.rmSync(path.join(PLUGINS_DIR, id), { recursive: true, force: true });
   state.splice(idx, 1);
   saveState();
@@ -1333,7 +1325,7 @@ function manifest(pool, req, idOverride) {
   // self-heal: stale empty catalogs kick a background warm (Render idle spin-down)
   for (const p of pool.plugins.values()) {
     if (!p.sections.size && Date.now() - p.sectionsTs > CACHE_TTL_MS) {
-      warmAll().catch(() => {});
+      warmAll();
       break;
     }
   }
@@ -1349,6 +1341,33 @@ function manifest(pool, req, idOverride) {
   };
 }
 
+async function searchPool(targets, type, search) {
+  const seen = new Set();
+  const items = [];
+  for (const p of targets) {
+    if (!p.runtime) continue;
+    // plugins may export search or getSearch (CloudStream naming)
+    const fn = p.api.includes("search")
+      ? "search"
+      : p.api.includes("getSearch")
+        ? "getSearch"
+        : null;
+    if (!fn) continue;
+    const r = await callPlugin(p.runtime, fn, [search]);
+    if (!r.success || !Array.isArray(r.data)) {
+      console.warn("plugin", p.name, "search failed:", r.message || "no data");
+      continue;
+    }
+    for (const item of r.data) {
+      if (!item || !item.url || mapType(item.type) !== type) continue;
+      if (seen.has(item.url)) continue;
+      seen.add(item.url);
+      items.push(item);
+    }
+  }
+  return items;
+}
+
 async function handleCatalog(req, res, type, catalogId, search, pool) {
   let found = findCatalog(pool, catalogId);
   let items = [];
@@ -1358,34 +1377,11 @@ async function handleCatalog(req, res, type, catalogId, search, pool) {
   if (search) {
     // Stremio's global search hits /catalog/<type>/top.json?search=... (and any
     // other unknown id) — route it to the pool's plugins' search and merge
-    const targets = found ? [found.plugin] : [...pool.plugins.values()];
-    const seen = new Set();
-    for (const p of targets) {
-      if (!p.runtime) continue;
-      // plugins may export search or getSearch (CloudStream naming)
-      const fn = p.api.includes("search")
-        ? "search"
-        : p.api.includes("getSearch")
-          ? "getSearch"
-          : null;
-      if (!fn) continue;
-      const r = await callPlugin(p.runtime, fn, [search]);
-      if (!r.success || !Array.isArray(r.data)) {
-        console.warn(
-          "plugin",
-          p.name,
-          "search failed:",
-          r.message || "no data",
-        );
-        continue;
-      }
-      for (const item of r.data) {
-        if (!item || !item.url || mapType(item.type) !== type) continue;
-        if (seen.has(item.url)) continue;
-        seen.add(item.url);
-        items.push(item);
-      }
-    }
+    items = await searchPool(
+      found ? [found.plugin] : [...pool.plugins.values()],
+      type,
+      search,
+    );
   } else {
     if (!found)
       return sendJson(res, 404, { error: "unknown catalog: " + catalogId });
@@ -1395,7 +1391,6 @@ async function handleCatalog(req, res, type, catalogId, search, pool) {
     // populated by the warm above) and fall back to an empty list
     if (!found.section) found = findCatalog(pool, catalogId);
     items = found.section ? found.section.items : [];
-    // honor the extras the manifest advertises (skip pagination + genre)
     if (genre) {
       const g = genre.toLowerCase();
       items = items.filter((it) =>
@@ -1459,42 +1454,30 @@ async function handleMeta(req, res, type, id, pool) {
   sendJson(res, 200, { meta: mapMeta(item) });
 }
 
+async function loadStreamsFor(plugin, id) {
+  const r = await callPlugin(plugin.runtime, "loadStreams", [id]);
+  return r.success && Array.isArray(r.data) ? r.data : [];
+}
+
 async function resolveStreams(plugin, metaId, season, episode) {
   if (!plugin.runtime) return [];
-  let raw = [];
+  const item = await getRawItem(plugin, metaId);
   if (season !== null) {
-    const item = await getRawItem(plugin, metaId);
-    if (item && Array.isArray(item.episodes)) {
-      const idx = item.episodes.findIndex((e, i) => {
-        const n = epNumbers(e, i);
-        return n.season === season && n.episode === episode;
-      });
-      if (idx >= 0) {
-        const ep = item.episodes[idx];
-        const r = await callPlugin(plugin.runtime, "loadStreams", [
-          ep.url || metaId,
-        ]);
-        if (r.success && Array.isArray(r.data)) raw = r.data;
-      }
-    }
-  } else {
-    const item = await getRawItem(plugin, metaId);
-    if (item) {
-      if (Array.isArray(item.streams) && item.streams.length) {
-        raw = item.streams;
-      } else if (Array.isArray(item.episodes) && item.episodes.length) {
-        const r = await callPlugin(plugin.runtime, "loadStreams", [
-          item.episodes[0].url || metaId,
-        ]);
-        if (r.success && Array.isArray(r.data)) raw = r.data;
-      }
-    }
-    if (!raw.length) {
-      const r = await callPlugin(plugin.runtime, "loadStreams", [metaId]);
-      if (r.success && Array.isArray(r.data)) raw = r.data;
-    }
+    if (!item || !Array.isArray(item.episodes)) return [];
+    const idx = item.episodes.findIndex((e, i) => {
+      const n = epNumbers(e, i);
+      return n.season === season && n.episode === episode;
+    });
+    if (idx < 0) return [];
+    return loadStreamsFor(plugin, item.episodes[idx].url || metaId);
   }
-  return raw;
+  if (item && Array.isArray(item.streams) && item.streams.length)
+    return item.streams;
+  if (item && Array.isArray(item.episodes) && item.episodes.length) {
+    const r = await loadStreamsFor(plugin, item.episodes[0].url || metaId);
+    if (r.length) return r;
+  }
+  return loadStreamsFor(plugin, metaId);
 }
 async function handleStream(req, res, type, id, pool, base) {
   // SkyStream convention: series video ids are <metaId>:<season>:<episode>.
@@ -1544,7 +1527,6 @@ function sendStreams(res, raw, base, pluginName) {
 
 // fetch with per-hop SSRF check and no silent cross-host redirects
 async function fetchSafe(url, headers, maxHops, signal) {
-  maxHops = maxHops || 5;
   let cur = url;
   for (let i = 0; i < maxHops; i++) {
     let u;
@@ -1943,6 +1925,11 @@ const server = http.createServer(async (req, res) => {
 // flaky upstream would wipe the catalogs the add flow just built.
 let booting = true;
 let lastSelfWrite = 0;
+// paths the server itself wrote (installs, state loads) — inotify batches
+// events, so they can arrive seconds after the write when the timestamp
+// guard alone would let a self-write trigger a reload
+const selfWritten = new Set();
+setInterval(() => selfWritten.clear(), 30000).unref();
 let reloadTimer = null;
 let reloadChain = Promise.resolve();
 const reloadNow = () => {
@@ -1959,7 +1946,10 @@ const reloadNow = () => {
   }, 500);
 };
 if (process.env.NODE_ENV !== "production") {
-  const watcher = fs.watch(PLUGINS_DIR, { recursive: true }, () => reloadNow());
+  const watcher = fs.watch(PLUGINS_DIR, { recursive: true }, (ev, fname) => {
+    if (fname && selfWritten.has(path.join(PLUGINS_DIR, fname))) return;
+    reloadNow();
+  });
   // a plugin dir removed mid-watch makes the recursive watcher throw ENOENT
   // and crash the whole server — ignore it, reloadNow() handles the change
   watcher.on("error", (e) => {
@@ -1983,11 +1973,10 @@ async function boot() {
   });
   // warm in the background — slow plugins (token-minting getHome can take
   // ~60s) must not delay boot past Render's deploy timeout
-  warmAll().catch((e) => console.warn("boot warm failed:", e.message));
+  warmAll();
 }
 
-// refresh catalogs periodically so the manifest stays current
-setInterval(() => warmAll().catch(() => {}), 30 * 60 * 1000).unref();
+setInterval(() => warmAll(), 30 * 60 * 1000).unref();
 
 function shutdown() {
   console.log("shutting down");

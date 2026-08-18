@@ -127,7 +127,7 @@
       ${error ? `<p class="card-error-msg">${esc(error)}</p>` : ""}
       <div class="chips">
         ${
-          catalogs.length
+          (catalogs || []).length
             ? catalogs
                 .map((c) => `<span class="chip">${esc(c.name)}</span>`)
                 .join("")
@@ -173,6 +173,9 @@
 
   function render(plugins) {
     lastPlugins = plugins;
+    // keep the scroll position: re-rendering removes and re-appends every
+    // card, which otherwise snaps the page to the top
+    const scrollY = window.scrollY;
     // remove only the plugin cards — the add card lives in the grid too
     grid.querySelectorAll(".card").forEach((c) => c.remove());
     empty.hidden = plugins.length > 0;
@@ -225,6 +228,7 @@
       });
       grid.appendChild(card);
     }
+    window.scrollTo(0, scrollY);
   }
 
   function updateSelBar() {
@@ -461,27 +465,29 @@
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || "HTTP " + res.status);
       const list = data.plugins || [];
-      repoInfo.textContent =
-        "Repository \u201c" +
-        (data.name || "?") +
-        "\u201d loaded \u2014 probing " +
-        list.length +
-        " plugin manifests\u2026";
-      repoInfo.hidden = false;
-      await Promise.all(list.map(probeRepoPlugin));
+      // initial card state before probes run: repo categories + "Available"
+      for (const rp of list) {
+        rp.status = "available";
+        rp.catalogs = (rp.categories || []).map((c) => ({ name: c }));
+      }
       repoPluginList = list;
       urlInput.value = "";
       repoInfo.textContent =
         "Repository \u201c" +
         (data.name || "?") +
         "\u201d \u2014 " +
-        repoPluginList.length +
+        list.length +
         " plugins below.";
-      toast("Repo loaded: " + repoPluginList.length + " plugins");
-      // load() skips re-render when the plugin list didn't change — force it
-      // so the repo's cards show up in the grid
+      repoInfo.hidden = false;
+      // render right away (cards show the repo's own categories); manifest
+      // probes fill in richer catalogs in the background
       lastJson = "";
       await load();
+      Promise.all(list.map(probeRepoPlugin)).then(() => {
+        lastJson = "";
+        load().catch(() => {});
+      });
+      toast("Repo loaded: " + list.length + " plugins");
     } catch (e) {
       addError.textContent = e.message;
       addError.hidden = false;
@@ -504,10 +510,35 @@
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || "HTTP " + res.status);
       toast("Installed " + data.plugin.name);
-      // re-render so the repo card becomes a live installed card with its
-      // real manifest URL
-      lastJson = "";
-      await load();
+      // keep the selection: migrate repo:url -> installed plugin id
+      if (selected.has("repo:" + url)) {
+        selected.delete("repo:" + url);
+        selected.add(data.plugin.id);
+      }
+      // swap the repo card for the installed card IN PLACE — no full
+      // re-render, so the grid doesn't reorder (the card jumping to the top
+      // of the page) or flash through the fade-in animation
+      const card = [...grid.querySelectorAll(".card")].find((c) =>
+        c.querySelector('[data-install="' + CSS.escape(url) + '"]'),
+      );
+      if (card) {
+        const p = data.plugin;
+        card.className = "card" + (p.status === "error" ? " card-error" : "");
+        if (selected.has(p.id)) card.classList.add("card-selected");
+        card.innerHTML = cardHtml({
+          key: p.id,
+          name: p.name,
+          status: p.status,
+          error: p.error,
+          catalogs: p.catalogs,
+          url: p.addonUrl,
+          isRepo: false,
+        });
+        updateSelBar();
+      } else {
+        lastJson = "";
+        await load();
+      }
       window.location.href = stremioInstallUrl(data.plugin.addonUrl);
     } catch (e) {
       toast(e.message, "error");

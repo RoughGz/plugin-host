@@ -167,29 +167,8 @@ async function loadState() {
   } catch (e) {
     state = [];
   }
-  // disk wiped → GitHub mirror, then legacy plugins.txt
-  if (await loadStateFromGithub()) return;
-  try {
-    const txt = fs.readFileSync(path.join(ROOT, "plugins.txt"), "utf8");
-    const seen = new Set();
-    for (const url of txt
-      .split("\n")
-      .map((s) => s.trim())
-      .filter(Boolean)) {
-      const name = pluginNameFromUrl(url) || "plugin";
-      let id = slugify(name);
-      let n = 2;
-      while (seen.has(id)) id = slugify(name) + "-" + n++;
-      seen.add(id);
-      state.push({ id, name, url, addedAt: Date.now() });
-    }
-    if (state.length) {
-      saveState();
-      console.log("migrated", state.length, "plugins from plugins.txt");
-    }
-  } catch (e) {
-    // no plugins.txt — fresh start, dashboard is the manager
-  }
+  // disk wiped → GitHub mirror
+  await loadStateFromGithub();
 }
 
 function saveState() {
@@ -973,6 +952,38 @@ function saveRepoPlugins() {
   );
 }
 
+// seed the repo registry from plugins.txt (one repo.json URL per line) —
+// survives disk wipes: every listed plugin's /<slug>/ URL keeps working
+async function seedReposFromFile() {
+  let lines = [];
+  try {
+    lines = fs
+      .readFileSync(path.join(ROOT, "plugins.txt"), "utf8")
+      .split("\n")
+      .map((s) => s.trim())
+      .filter((s) => s && !s.startsWith("#"));
+  } catch (e) {
+    return; // no plugins.txt — dashboard-managed repos only
+  }
+  await Promise.allSettled(
+    lines.map(async (url) => {
+      try {
+        const list = await fetchRepoPlugins(url);
+        for (const p of list.plugins)
+          repoPlugins.set(slugify(p.name), { url: p.url, name: p.name });
+        console.log(
+          "seeded repo:",
+          list.name,
+          "(" + list.plugins.length + " plugins)",
+        );
+      } catch (e) {
+        console.warn("repo seed failed:", url, "-", e.message);
+      }
+    }),
+  );
+  saveRepoPlugins();
+}
+
 function loadBundles() {
   try {
     bundles = JSON.parse(fs.readFileSync(BUNDLES_FILE, "utf8"));
@@ -1737,66 +1748,94 @@ const server = http.createServer(async (req, res) => {
       );
     }
 
-    // ---- per-plugin addon URLs: /<id>/<route> ----
+    // ---- per-plugin addon URLs: /<id-or-slug-selection>/<route> ----
+    // A selection (<slug1>-<slug2>-…) is served from one combined pool. The
+    // URL is deterministic: same selection -> same link, restart-proof (the
+    // registry is re-seeded from plugins.txt at every boot).
     const pluginM = /^\/([A-Za-z0-9_-]{1,64})\/(.+)$/.exec(url);
-    if (pluginM && !plugins.has(pluginM[1])) {
-      // repo-listed plugin not installed yet: auto-install on first access
-      // so the predicted addon URL (/<slug>/manifest.json) works as-is
-      const rp = repoPlugins.get(pluginM[1]);
-      if (rp) {
-        try {
-          await installPluginFromUrl(rp.url);
-        } catch (e) {
-          console.warn("auto-install skip", rp.url, "-", e.message);
+    if (pluginM) {
+      const seg = pluginM[1];
+      const rest = "/" + pluginM[2];
+      if (!plugins.has(seg)) {
+        // repo-listed plugin not installed yet: auto-install on first access
+        // so the predicted addon URL (/<slug>/manifest.json) works as-is
+        const rp = repoPlugins.get(seg);
+        if (rp) {
+          try {
+            await installPluginFromUrl(rp.url);
+          } catch (e) {
+            console.warn("auto-install skip", rp.url, "-", e.message);
+          }
         }
       }
-      if (!plugins.has(pluginM[1])) {
-        // multi-provider .sky installs as <slug>-<provider>: point the
-        // request at the first provider addon
-        const alt = [...plugins.keys()].find((k) =>
-          k.startsWith(pluginM[1] + "-"),
-        );
-        if (alt)
-          return res
-            .writeHead(302, { Location: "/" + alt + "/" + pluginM[2] })
-            .end();
+      if (plugins.has(seg)) {
+        const plugin = plugins.get(seg);
+        const pool = poolFor(plugin);
+        const base = publicBase(req) + "/" + seg;
+        if (rest === "/manifest.json")
+          return sendJson(res, 200, manifest(pool, req));
+        const proxyM = /^\/proxy\/(.+)$/.exec(rest);
+        if (proxyM) return handleProxy(req, res, proxyM[1]);
+        const catM =
+          /^\/catalog\/(movie|series)\/([^/]+)(?:\/[^/]+)?\.json$/.exec(rest);
+        if (catM)
+          return handleCatalog(
+            req,
+            res,
+            catM[1],
+            decodeId(catM[2]),
+            query.get("search"),
+            pool,
+          );
+        const metaM = /^\/meta\/(movie|series)\/(.+)\.json$/.exec(rest);
+        if (metaM)
+          return handleMeta(req, res, metaM[1], decodeId(metaM[2]), pool);
+        const streamM = /^\/stream\/(movie|series)\/(.+)\.json$/.exec(rest);
+        if (streamM)
+          return handleStream(
+            req,
+            res,
+            streamM[1],
+            decodeId(streamM[2]),
+            pool,
+            base,
+          );
+        return sendJson(res, 404, { error: "not found" });
       }
-    }
-    if (pluginM && plugins.has(pluginM[1])) {
-      const id = pluginM[1];
-      const rest = "/" + pluginM[2];
-      const plugin = plugins.get(id);
-      const pool = poolFor(plugin);
-      const base = publicBase(req) + "/" + id;
-      if (rest === "/manifest.json")
-        return sendJson(res, 200, manifest(pool, req));
-      const proxyM = /^\/proxy\/(.+)$/.exec(rest);
-      if (proxyM) return handleProxy(req, res, proxyM[1]);
-      const catM =
-        /^\/catalog\/(movie|series)\/([^/]+)(?:\/[^/]+)?\.json$/.exec(rest);
-      if (catM)
-        return handleCatalog(
-          req,
-          res,
-          catM[1],
-          decodeId(catM[2]),
-          query.get("search"),
-          pool,
-        );
-      const metaM = /^\/meta\/(movie|series)\/(.+)\.json$/.exec(rest);
-      if (metaM)
-        return handleMeta(req, res, metaM[1], decodeId(metaM[2]), pool);
-      const streamM = /^\/stream\/(movie|series)\/(.+)\.json$/.exec(rest);
-      if (streamM)
-        return handleStream(
-          req,
-          res,
-          streamM[1],
-          decodeId(streamM[2]),
-          pool,
-          base,
-        );
-      return sendJson(res, 404, { error: "not found" });
+      // multi-provider .sky installs as <slug>-<provider>: point the request
+      // at the first provider addon
+      const alt = [...plugins.keys()].find((k) => k.startsWith(seg + "-"));
+      if (alt)
+        return res
+          .writeHead(302, { Location: "/" + alt + "/" + pluginM[2] })
+          .end();
+      // combined selection: every dash-separated part is an installed id or a
+      // repo slug — missing ones are auto-installed, then served from one pool
+      if (seg.includes("-")) {
+        const ids = [];
+        for (const part of seg.split("-")) {
+          if (plugins.has(part)) {
+            ids.push(part);
+            continue;
+          }
+          const rp = repoPlugins.get(part);
+          if (!rp) break;
+          try {
+            await installPluginFromUrl(rp.url);
+          } catch (e) {
+            console.warn("auto-install skip", rp.url, "-", e.message);
+          }
+          const found = [...plugins.keys()].filter(
+            (k) => k === part || k.startsWith(part + "-"),
+          );
+          if (!found.length) break;
+          ids.push(...found);
+        }
+        if (ids.length > 1) {
+          const pool = bundlePool({ pluginIds: [...new Set(ids)] });
+          return serveBundleDispatch(req, res, pool, seg, rest, query);
+        }
+      }
     }
 
     // ---- default addon (all plugins) ----
@@ -1872,6 +1911,9 @@ async function boot() {
   await loadFromState();
   loadBundles();
   loadRepoPlugins();
+  // awaited: the first request may hit a repo slug right after boot, and the
+  // seed must have populated the registry by then (parallel, ~2-5s total)
+  await seedReposFromFile();
   booting = false;
   server.listen(PORT, () => {
     console.log("addon listening on http://localhost:" + PORT);

@@ -264,40 +264,29 @@
     selPreview.hidden = false;
   }
 
-  async function createBundle() {
+  function createBundle() {
     if (!selected.size) return;
-    makeBundle.disabled = true;
-    makeBundle.querySelector(".btn-label").hidden = true;
-    makeBundle.querySelector(".spinner").hidden = false;
-    try {
-      // stateless bundle: the URL encodes the manifest URLs, so it survives
-      // restarts. Selection is kept — nothing is removed from the list.
-      const urls = [...selected]
-        .map((k) => {
-          if (k.startsWith("repo:")) return k.slice(5);
-          const p = lastPlugins.find((x) => x.id === k);
-          return p ? p.url : null;
-        })
-        .filter(Boolean);
-      if (!urls.length) {
-        toast("Nothing to bundle", "error");
-        return;
-      }
-      const res = await api("api/bundles", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ urls }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || "HTTP " + res.status);
-      showBundleResult(data.bundle.url);
-    } catch (e) {
-      toast(e.message, "error");
-    } finally {
-      makeBundle.disabled = false;
-      makeBundle.querySelector(".btn-label").hidden = false;
-      makeBundle.querySelector(".spinner").hidden = true;
+    // deterministic, restart-proof link: /<slug1>-<slug2>-…/manifest.json —
+    // same selection always yields the same URL; the server auto-installs
+    // missing plugins on first access
+    const slugs = [...selected]
+      .map((k) => {
+        if (k.startsWith("repo:")) {
+          const rp = repoPluginList.find((p) => "repo:" + p.url === k);
+          return rp ? slugify(rp.name) : null;
+        }
+        const p = lastPlugins.find((x) => x.id === k);
+        return p ? p.id : null;
+      })
+      .filter(Boolean)
+      .sort();
+    if (!slugs.length) {
+      toast("Nothing to bundle", "error");
+      return;
     }
+    showBundleResult(
+      location.origin + "/" + slugs.join("-") + "/manifest.json",
+    );
   }
 
   function showBundleResult(url) {

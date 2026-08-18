@@ -1429,7 +1429,8 @@ const META_FAST_MS = 3000;
 function catalogItemFor(plugin, id) {
   for (const section of plugin.sections.values())
     for (const item of section.items)
-      if (item.url === id)
+      // plugins differ: some emit url, some emit id (movieblast) — match both
+      if (item.url === id || item.id === id)
         return {
           ...item,
           episodes: [{ name: "Play", url: id }],

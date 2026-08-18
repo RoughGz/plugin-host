@@ -476,6 +476,21 @@
         lastJson = "";
         load().catch(() => {});
       });
+      // the server installs+warms repo plugins in the background — poll until
+      // every repo plugin is installed so its categories show up right away
+      const poll = setInterval(async () => {
+        try {
+          const r = await api("api/plugins");
+          const installed = (await r.json()).plugins || [];
+          if (list.every((rp) => installed.some((p) => p.url === rp.url)))
+            clearInterval(poll);
+          lastJson = "";
+          load().catch(() => {});
+        } catch (e) {
+          clearInterval(poll);
+        }
+      }, 3000);
+      setTimeout(() => clearInterval(poll), 60000);
       toast("Repo loaded: " + list.length + " plugins");
     } catch (e) {
       addError.textContent = e.message;
@@ -528,7 +543,14 @@
         lastJson = "";
         await load();
       }
-      window.location.href = stremioInstallUrl(data.plugin.addonUrl);
+      // trigger the stremio:// deep link without navigating the page — a
+      // full-page navigation to a custom scheme unloads the dashboard and
+      // resets scroll to top
+      const iframe = document.createElement("iframe");
+      iframe.style.display = "none";
+      iframe.src = stremioInstallUrl(data.plugin.addonUrl);
+      document.body.appendChild(iframe);
+      setTimeout(() => iframe.remove(), 2000);
     } catch (e) {
       toast(e.message, "error");
     }

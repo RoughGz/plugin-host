@@ -860,17 +860,23 @@ async function getRawItem(plugin, metaId, timeoutMs) {
   const cached = plugin.metaCache.get(metaId);
   const ttl = cached && cached.ttl ? cached.ttl : CACHE_TTL_MS;
   if (cached && Date.now() - cached.ts < ttl) return cached.value;
-  const load = callPlugin(plugin.runtime, "load", [metaId]);
-  // keep caching even when the caller times out: the follow-up stream request
-  // then hits the cache instead of re-loading the slow upstream
-  load
-    .then((res) => {
-      if (!res || !res.success || !res.data || typeof res.data !== "object")
-        return;
-      if (!res.data.url) res.data.url = metaId;
-      cachePut(plugin.metaCache, metaId, Date.now(), res.data);
-    })
-    .catch(() => {});
+  // one in-flight load per id: the fast meta path and the follow-up stream
+  // request must share the same call, not start a second slow upstream fetch
+  if (!plugin.pendingLoads) plugin.pendingLoads = new Map();
+  let load = plugin.pendingLoads.get(metaId);
+  if (!load) {
+    load = callPlugin(plugin.runtime, "load", [metaId]);
+    plugin.pendingLoads.set(metaId, load);
+    load
+      .then((res) => {
+        if (!res || !res.success || !res.data || typeof res.data !== "object")
+          return;
+        if (!res.data.url) res.data.url = metaId;
+        cachePut(plugin.metaCache, metaId, Date.now(), res.data);
+      })
+      .catch(() => {})
+      .finally(() => plugin.pendingLoads.delete(metaId));
+  }
   const res = timeoutMs
     ? await Promise.race([
         load,
@@ -1292,6 +1298,12 @@ async function handleListRepo(req, res) {
       repoPlugins.set(slugify(p.name), { url: p.url, name: p.name });
     }
     saveRepoPlugins();
+    // install + warm in the background so the addon's categories are ready
+    // when the user taps "Install in Stremio" — the dashboard polls
+    // /api/plugins and re-renders as each plugin comes up
+    Promise.allSettled(
+      list.plugins.map((p) => installPluginFromUrl(p.url, p.name)),
+    ).catch(() => {});
     sendJson(res, 200, list);
   } catch (e) {
     sendJson(res, 400, { error: e.message });
@@ -1399,22 +1411,15 @@ async function handleCatalog(req, res, type, catalogId, search, pool) {
   });
 }
 
-// ids travel encoded, sometimes double-encoded (proxies re-encode); canonicalize
+// clients (Nuvio, Stremio) percent-encode the id exactly once — decode once.
+// Re-decoding while %XX remains corrupts ids whose own content contains
+// %-escapes (JSON-blob ids with URLs in descriptions).
 function decodeId(raw) {
-  let id = decodeURIComponent(raw);
-  // Nuvio (and some clients) send ids double-encoded — decode again only
-  // while it still isn't a usable URL; a decoded URL's own %-escapes (query
-  // strings in JSON-blob ids) must never be re-decoded
-  while (!id.includes("://") && /%[0-9a-fA-F]{2}/.test(id)) {
-    try {
-      const d = decodeURIComponent(id);
-      if (d === id) break;
-      id = d;
-    } catch (e) {
-      break;
-    }
+  try {
+    return decodeURIComponent(raw);
+  } catch (e) {
+    return raw;
   }
-  return id;
 }
 
 // Meta is served entirely from the plugin's own load() data — the plugins are
@@ -1443,6 +1448,12 @@ async function handleMeta(req, res, type, id, pool) {
   if (!plugin) plugin = await probePluginForId(id, pool);
   if (!plugin) return sendJson(res, 404, { error: "no plugin for id: " + id });
   let item = await getRawItem(plugin, id, META_FAST_MS);
+  if (!item) {
+    // cold start: sections are empty until warmAll() finishes, so the catalog
+    // fallback can't help yet — wait for the in-flight load (well under
+    // Nuvio's 60s OkHttp timeout) before giving up
+    item = await getRawItem(plugin, id, 15000);
+  }
   if (!item) item = catalogItemFor(plugin, id);
   if (!item) return sendJson(res, 404, { error: "meta not found" });
   sendJson(res, 200, { meta: mapMeta(item) });

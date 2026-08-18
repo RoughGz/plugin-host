@@ -853,12 +853,31 @@ function cachePut(map, key, ts, value, ttl) {
   map.set(key, { ts, value, ttl });
 }
 
-async function getRawItem(plugin, metaId) {
+const META_TIMED_OUT = Symbol("meta-timed-out");
+
+async function getRawItem(plugin, metaId, timeoutMs) {
   if (!plugin.runtime) return null;
   const cached = plugin.metaCache.get(metaId);
   const ttl = cached && cached.ttl ? cached.ttl : CACHE_TTL_MS;
   if (cached && Date.now() - cached.ts < ttl) return cached.value;
-  const res = await callPlugin(plugin.runtime, "load", [metaId]);
+  const load = callPlugin(plugin.runtime, "load", [metaId]);
+  // keep caching even when the caller times out: the follow-up stream request
+  // then hits the cache instead of re-loading the slow upstream
+  load
+    .then((res) => {
+      if (!res || !res.success || !res.data || typeof res.data !== "object")
+        return;
+      if (!res.data.url) res.data.url = metaId;
+      cachePut(plugin.metaCache, metaId, Date.now(), res.data);
+    })
+    .catch(() => {});
+  const res = timeoutMs
+    ? await Promise.race([
+        load,
+        new Promise((r) => setTimeout(() => r(META_TIMED_OUT), timeoutMs)),
+      ])
+    : await load;
+  if (res === META_TIMED_OUT) return null; // load still running; no negative cache
   if (!res.success || !res.data || typeof res.data !== "object") {
     // negative cache: a dead id must not re-trigger the full slow load on
     // every stream/meta request — but keep it short so a transient upstream
@@ -869,7 +888,6 @@ async function getRawItem(plugin, metaId) {
   // SkyStream parity: plugins may omit `url` in load() results — backfill it
   // with the requested URL (movie playback depends on this)
   if (!res.data.url) res.data.url = metaId;
-  cachePut(plugin.metaCache, metaId, Date.now(), res.data);
   return res.data;
 }
 
@@ -953,8 +971,11 @@ function saveRepoPlugins() {
 }
 
 // seed the repo registry from plugins.txt (one repo.json URL per line) —
-// survives disk wipes: every listed plugin's /<slug>/ URL keeps working
+// survives disk wipes: every listed plugin's /<slug>/ URL keeps working.
+// Skipped when the registry already exists (normal restart): the persisted
+// registry is authoritative and boot stays fast (no 12 GitHub fetches).
 async function seedReposFromFile() {
+  if (repoPlugins.size) return;
   let lines = [];
   try {
     lines = fs
@@ -1062,7 +1083,8 @@ function publicBundle(b, req) {
   return {
     id: b.id,
     pluginIds: b.pluginIds,
-    url: publicBase(req) + "/bundle/" + b.id + "/manifest.json",
+    // deterministic name-based URL: same selection → same link
+    url: publicBase(req) + "/" + b.pluginIds.join("-") + "/manifest.json",
     createdAt: b.createdAt,
   };
 }
@@ -1078,20 +1100,30 @@ async function handleAddBundle(req, res) {
   } catch (e) {
     return sendJson(res, 400, { error: "bad json body" });
   }
-  // stateless bundle: client passes manifest URLs; the returned URL encodes
-  // them, so it survives deploys/state wipes (see /bundle/auto route)
+  // stateless bundle: client passes manifest URLs; plugins are installed now
+  // (state survives wipes via the GitHub mirror), and the returned URL is the
+  // deterministic name-based form /slug1-slug2-.../manifest.json
   if (Array.isArray(body && body.urls)) {
     const urls = body.urls
       .filter((u) => typeof u === "string" && u.trim())
       .slice(0, 20); // cap hostile payloads; bundles of 3-5 are the norm
     if (!urls.length) return sendJson(res, 400, { error: "no plugin urls" });
-    const enc = Buffer.from(JSON.stringify(urls)).toString("base64url");
+    const ids = [];
+    for (const u of urls) {
+      try {
+        ids.push(await installPluginFromUrl(u));
+      } catch (e) {
+        console.warn("bundle skip", u, "-", e.message);
+      }
+    }
+    if (!ids.length)
+      return sendJson(res, 400, { error: "no installable plugins" });
     return sendJson(res, 201, {
       bundle: {
         id: autoBundleId(urls),
         urls,
         stateless: true,
-        url: publicBase(req) + "/bundle/auto/" + enc + "/manifest.json",
+        url: publicBase(req) + "/" + ids.join("-") + "/manifest.json",
       },
     });
   }
@@ -1388,11 +1420,29 @@ function decodeId(raw) {
 // Meta is served entirely from the plugin's own load() data — the plugins are
 // standalone (own catalogs, own meta, own streams), like Dramayo/Muvibox/IPTV
 // addons. No Cinemeta coupling: no mirroring, no gap-filling.
+// Nuvio caps meta requests at 5s (FETCH_TIMEOUT_MS in its MetaDetailsRepository)
+// — a slow plugin load must not blank the detail page. Fall back to the
+// catalog item (in-memory, instant) with one playable video; the background
+// load keeps running and caches, so the follow-up stream request is complete.
+const META_FAST_MS = 3000;
+
+function catalogItemFor(plugin, id) {
+  for (const section of plugin.sections.values())
+    for (const item of section.items)
+      if (item.url === id)
+        return {
+          ...item,
+          episodes: [{ name: "Play", url: id }],
+        };
+  return null;
+}
+
 async function handleMeta(req, res, type, id, pool) {
   let plugin = pluginForId(id, pool);
   if (!plugin) plugin = await probePluginForId(id, pool);
   if (!plugin) return sendJson(res, 404, { error: "no plugin for id: " + id });
-  const item = await getRawItem(plugin, id);
+  let item = await getRawItem(plugin, id, META_FAST_MS);
+  if (!item) item = catalogItemFor(plugin, id);
   if (!item) return sendJson(res, 404, { error: "meta not found" });
   sendJson(res, 200, { meta: mapMeta(item) });
 }
@@ -1687,7 +1737,7 @@ const server = http.createServer(async (req, res) => {
       return handleListBundles(req, res);
     if (url === "/api/bundles" && req.method === "POST")
       return handleAddBundle(req, res);
-    const delBM = /^\/api\/bundles\/([a-f0-9]{8})$/.exec(url);
+    const delBM = /^\/api\/bundles\/([a-f0-9]{16})$/.exec(url);
     if (delBM && req.method === "DELETE")
       return handleDeleteBundle(req, res, delBM[1]);
 
@@ -1698,7 +1748,7 @@ const server = http.createServer(async (req, res) => {
     if (serveStatic(req, res, url)) return;
 
     // ---- bundles: unique addon URLs for a user's plugin selection ----
-    const bundleM = /^\/bundle\/([a-f0-9]{8})\/(.+)$/.exec(url);
+    const bundleM = /^\/bundle\/([a-f0-9]{16})\/(.+)$/.exec(url);
     if (bundleM) {
       const b = bundles.find((x) => x.id === bundleM[1]);
       if (!b) return sendJson(res, 404, { error: "bundle not found" });

@@ -152,6 +152,19 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+// slow upstreams (movies4u etc. take ~5s per request) need several warm
+// attempts before sections fill; each stale manifest fetch re-triggers the
+// warm. Returns the manifest once catalogs appear, null when the upstream
+// looks dead — caller SKIPs then, like the other network-dependent checks.
+async function waitForCatalogs(url, tries = 12, delayMs = 3000) {
+  for (let i = 0; i < tries; i++) {
+    const m = await getJson(url);
+    if (Array.isArray(m.catalogs) && m.catalogs.length > 0) return m;
+    await sleep(delayMs);
+  }
+  return null;
+}
+
 async function waitFor(predicate, timeoutMs, what) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
@@ -205,10 +218,9 @@ async function main() {
       'globalThis.getHome = function(cb){ n++; if (n === 1) cb({success:true, data:{Keep:[{url:"https://warmfail.test/keep", title:"Keep Me"}]}}); else cb({success:true, data:{}}); };\n',
   );
 
-  // seed plugins: two real plugins, zinkmovies first → its catalogs must
-  // appear on top. Written as the legacy plugins.txt so boot exercises the
-  // one-time migration into data/plugins.json. Network-dependent: boot
-  // survives, checks degrade to SKIP.
+  // seed plugins: a real repo.json so boot exercises the repo registry
+  // seeding from plugins.txt (new semantics: one repo.json URL per line).
+  // Network-dependent: boot survives, seeding just warns on failure.
   const statePath = path.join(__dirname, "data", "plugins.json");
   const stateBackup = fs.existsSync(statePath)
     ? fs.readFileSync(statePath, "utf8")
@@ -216,8 +228,7 @@ async function main() {
   fs.rmSync(statePath, { force: true });
   fs.writeFileSync(
     path.join(__dirname, "plugins.txt"),
-    "https://github.com/likhithkrishna1103-tech/Hindmovie/tree/main/zinkmovies\n" +
-      "https://github.com/likhithkrishna1103-tech/Hindmovie/tree/main/anikage\n",
+    "https://raw.githubusercontent.com/likhithkrishna1103-tech/Hindmovie/main/repo.json\n",
   );
 
   console.log("server:");
@@ -303,22 +314,6 @@ async function main() {
       manifest2.catalogs.some((c) => c.id === warmCatId),
       "got: " + manifest2.catalogs.map((c) => c.id).join(", "),
     );
-
-    // plugins.txt migration: catalog order follows file order (zinkmovies first, anikage second)
-    const zkIdx = catIds.findIndex((id) => id.startsWith("zinkmovies_"));
-    const akIdx = catIds.findIndex((id) => id.startsWith("anikage_"));
-    const zkLast = catIds
-      .map((id, i) => (id.startsWith("zinkmovies_") ? i : -1))
-      .reduce((a, b) => Math.max(a, b), -1);
-    if (zkIdx === -1 || akIdx === -1) {
-      warn("plugins.txt migration (network): " + catIds.join(", "));
-    } else {
-      check(
-        "catalog order = plugins.txt order",
-        zkLast < akIdx,
-        "zinkmovies ends at " + zkLast + ", anikage starts at " + akIdx,
-      );
-    }
 
     // sandbox isolation: process/require/fs must be invisible
     const cat = await getJson(base + "/catalog/movie/__test___leaks.json");
@@ -487,6 +482,7 @@ async function main() {
     // dashboard API is the only way to add/remove plugins: POST a GitHub URL,
     // the plugin goes live with its own unique addon URL; DELETE removes it.
     console.log("dashboard API flow:");
+    let pid = null;
     try {
       const addRes = await fetch(base + "/api/plugins", {
         method: "POST",
@@ -502,16 +498,27 @@ async function main() {
         JSON.stringify(added).slice(0, 200),
       );
       if (addRes.status === 201) {
-        const pid = added.plugin.id;
-        const catIds = added.plugin.catalogs.map((c) => c.id);
+        pid = added.plugin.id;
+        let catIds = [];
         // unique addon URL serves a manifest with only that plugin's catalogs
-        const m = await getJson(base + "/" + pid + "/manifest.json");
-        check(
-          "unique addon URL works",
-          m.catalogs.length > 0 &&
-            m.catalogs.every((c) => catIds.includes(c.id)),
-          JSON.stringify(m.catalogs).slice(0, 200),
-        );
+        const m = await waitForCatalogs(base + "/" + pid + "/manifest.json");
+        if (!m) {
+          console.log(
+            "  SKIP unique addon URL (network): plugin never warmed up",
+          );
+        } else {
+          // the add response was captured before the warm finished; re-read
+          // the plugin's catalog list now that sections are populated
+          const list = await getJson(base + "/api/plugins");
+          const cur = list.plugins.find((p) => p.id === pid);
+          catIds = ((cur && cur.catalogs) || []).map((c) => c.id);
+          check(
+            "unique addon URL works",
+            m.catalogs.length > 0 &&
+              m.catalogs.every((c) => catIds.includes(c.id)),
+            JSON.stringify(m.catalogs).slice(0, 200),
+          );
+        }
         // duplicate add → 409
         const dup = await fetch(base + "/api/plugins", {
           method: "POST",
@@ -527,7 +534,7 @@ async function main() {
           "list includes plugin",
           list.plugins.some((p) => p.id === pid),
         );
-        // bundles: unique addon URL for a selection of plugins
+        // bundles: deterministic name-based URL for a selection of plugins
         const bAdd = await fetch(base + "/api/bundles", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -536,19 +543,31 @@ async function main() {
         const bData = await bAdd.json();
         check(
           "bundle created",
-          bAdd.status === 201 && !!bData.bundle && !!bData.bundle.id,
+          bAdd.status === 201 &&
+            !!bData.bundle &&
+            !!bData.bundle.id &&
+            bData.bundle.url === base + "/" + pid + "/manifest.json",
           JSON.stringify(bData).slice(0, 200),
         );
         let bUrl = null;
         if (bAdd.status === 201) {
           bUrl = bData.bundle.url;
-          const bm = await getJson(bUrl);
-          check(
-            "bundle manifest serves only selected plugins",
-            bm.catalogs.length > 0 &&
-              bm.catalogs.every((c) => catIds.includes(c.id)),
-            JSON.stringify(bm.catalogs).slice(0, 200),
-          );
+          const bm = await waitForCatalogs(bUrl);
+          if (!bm) {
+            console.log(
+              "  SKIP bundle manifest serves only selected plugins (network): plugin never warmed up",
+            );
+          } else {
+            const blist = await getJson(base + "/api/plugins");
+            const bcur = blist.plugins.find((p) => p.id === pid);
+            catIds = ((bcur && bcur.catalogs) || []).map((c) => c.id);
+            check(
+              "bundle manifest serves only selected plugins",
+              bm.catalogs.length > 0 &&
+                bm.catalogs.every((c) => catIds.includes(c.id)),
+              JSON.stringify(bm.catalogs).slice(0, 200),
+            );
+          }
           const bList = await getJson(base + "/api/bundles");
           check(
             "bundle listed",
@@ -574,9 +593,17 @@ async function main() {
         );
         check("plugin gone from manifest", gone);
         if (bUrl) {
-          // bundle pruned with its plugin → URL dead
-          const bGone = await fetch(bUrl);
-          check("bundle URL dead after plugin removed", bGone.status === 404);
+          // bundle record is pruned with its plugin: the legacy /bundle/<id>
+          // URL dies (the repo-backed slug URL survives via auto-install —
+          // that's the point of the name-based links)
+          const bGone = await fetch(
+            base + "/bundle/" + bData.bundle.id + "/manifest.json",
+          );
+          check(
+            "bundle URL dead after plugin removed",
+            bGone.status === 404,
+            "status=" + bGone.status,
+          );
           const bDel = await fetch(base + "/api/bundles/" + bData.bundle.id, {
             method: "DELETE",
           });
@@ -694,17 +721,24 @@ async function main() {
       const d = await add.json();
       check(
         "stateless bundle created",
-        add.status === 201 && /\/bundle\/auto\//.test(d.bundle.url),
+        add.status === 201 &&
+          d.bundle.url === base + "/" + pid + "/manifest.json",
         JSON.stringify(d).slice(0, 120),
       );
       if (add.status === 201) {
         try {
-          const m = await getJson(d.bundle.url);
-          check(
-            "stateless bundle manifest serves",
-            Array.isArray(m.catalogs) && m.catalogs.length > 0,
-            JSON.stringify(m.catalogs).slice(0, 100),
-          );
+          const m = await waitForCatalogs(d.bundle.url);
+          if (!m) {
+            console.log(
+              "  SKIP stateless bundle manifest serves (network): plugin never warmed up",
+            );
+          } else {
+            check(
+              "stateless bundle manifest serves",
+              Array.isArray(m.catalogs) && m.catalogs.length > 0,
+              JSON.stringify(m.catalogs).slice(0, 100),
+            );
+          }
         } catch (e) {
           warn("stateless bundle serve: " + e.message);
         }

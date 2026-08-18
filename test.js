@@ -710,20 +710,6 @@ async function main() {
         }
       }
     }
-    // bare imdb id mirrors Cinemeta (network — degrades to a warning)
-    try {
-      const r = await fetch(base + "/meta/movie/tt0111161.json", {
-        signal: AbortSignal.timeout(20000),
-      });
-      const j = await r.json().catch(() => ({}));
-      check(
-        "bare tt-id mirrors Cinemeta",
-        r.status === 200 && j.meta && j.meta.id === "tt0111161",
-        r.status + " " + JSON.stringify(j).slice(0, 80),
-      );
-    } catch (e) {
-      warn("bare tt-id mirror: " + e.message);
-    }
   } finally {
     server.kill();
     fs.rmSync(testDir, { recursive: true, force: true });

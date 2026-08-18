@@ -1374,77 +1374,16 @@ function decodeId(raw) {
   return id;
 }
 
-// ---------- Cinemeta ----------
-// Clients without a metadata addon (Nuvio etc.) render our meta as-is, so the
-// detail page must be complete on its own. When a plugin's item carries an
-// imdb id, fill any missing fields from Cinemeta (poster/description/rating/
-// cast/...). Also mirror Cinemeta for bare tt-ids so this addon can serve as
-// a metadata provider itself. Never fail a request on Cinemeta being down.
-const cinemetaCache = new Map(); // "type:ttid" -> { ts, value: meta|null }
-const CINEMETA_TTL_MS = 24 * 60 * 60 * 1000;
-
-async function cinemetaMeta(imdbId, type) {
-  if (!imdbId || !/^tt\d+$/i.test(imdbId)) return null;
-  const key = type + ":" + imdbId;
-  const cached = cinemetaCache.get(key);
-  if (cached && Date.now() - cached.ts < CINEMETA_TTL_MS) return cached.value;
-  try {
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 8000);
-    const res = await fetch(
-      "https://v3-cinemeta.strem.io/meta/" + type + "/" + imdbId + ".json",
-      { signal: ctrl.signal },
-    );
-    clearTimeout(t);
-    if (!res.ok) {
-      cinemetaCache.set(key, { ts: Date.now(), value: null });
-      return null;
-    }
-    const j = await res.json();
-    const value = (j && j.meta) || null;
-    cinemetaCache.set(key, { ts: Date.now(), value });
-    return value;
-  } catch (e) {
-    return null;
-  }
-}
-
-// fill only gaps — our plugin data wins, Cinemeta tops up what's missing
-function fillMetaGaps(meta, cm) {
-  if (!cm) return;
-  if (!meta.poster) meta.poster = cm.poster;
-  if (!meta.background) meta.background = cm.background;
-  if (!meta.logo) meta.logo = cm.logo;
-  if (!meta.description) meta.description = cm.description;
-  if (!meta.releaseInfo) meta.releaseInfo = cm.releaseInfo;
-  if (!meta.imdbRating) meta.imdbRating = cm.imdbRating;
-  if (!meta.released) meta.released = cm.released;
-  if (!meta.genres || !meta.genres.length) meta.genres = cm.genres;
-  if (!meta.cast || !meta.cast.length) meta.cast = cm.cast;
-}
-
+// Meta is served entirely from the plugin's own load() data — the plugins are
+// standalone (own catalogs, own meta, own streams), like Dramayo/Muvibox/IPTV
+// addons. No Cinemeta coupling: no mirroring, no gap-filling.
 async function handleMeta(req, res, type, id, pool) {
-  // bare imdb id: mirror Cinemeta directly — no plugin owns bare tt-ids, and
-  // probing first lets a plugin's load() stub (name = id) win the race
-  if (/^tt\d+$/i.test(id)) {
-    const cm = await cinemetaMeta(id, type);
-    if (cm) return sendJson(res, 200, { meta: cm });
-  }
   let plugin = pluginForId(id, pool);
   if (!plugin) plugin = await probePluginForId(id, pool);
   if (!plugin) return sendJson(res, 404, { error: "no plugin for id: " + id });
   const item = await getRawItem(plugin, id);
   if (!item) return sendJson(res, 404, { error: "meta not found" });
-  const meta = mapMeta(item);
-  // enrich from Cinemeta when the plugin knows the imdb id and our meta is
-  // missing fields — clients without Cinemeta get a complete detail page
-  const imdb =
-    item.imdbId || item.imdb_id || (item.ids && item.ids.imdb) || null;
-  if (imdb && (!meta.poster || !meta.description || !meta.imdbRating)) {
-    const cm = await cinemetaMeta(imdb, meta.type);
-    fillMetaGaps(meta, cm);
-  }
-  sendJson(res, 200, { meta });
+  sendJson(res, 200, { meta: mapMeta(item) });
 }
 
 async function resolveStreams(plugin, metaId, season, episode) {

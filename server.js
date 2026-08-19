@@ -1,215 +1,47 @@
+// Stateless plugin bridge: serves the Stremio addon protocol backed by remote
+// .sky plugin bundles. No installs, no state files, no worker threads — every
+// request resolves the plugin (slug config or URL in the path), loads its
+// source (cached), evaluates it in a vm sandbox, and calls the matching global
+// (getHome/load/loadStreams/search). Runs anywhere Node runs: Render/Railway/
+// Fly/VPS (node server.js) and Vercel serverless (api/bridge.js + vercel.json).
+"use strict";
 const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
+const vm = require("node:vm");
 const crypto = require("node:crypto");
 const { Readable } = require("node:stream");
 const { isPrivateHost } = require("./lib/net-guard");
-const { PluginRuntime, callPlugin } = require("./lib/plugin-host");
-const {
-  pluginNameFromUrl,
-  fetchPluginSource,
-  fetchPluginSourceFromSky,
-  fetchRepoPlugins,
-} = require("./lib/plugin-url");
+const { parseHtml, parse_html, unpackJs } = require("./lib/mini-dom");
+const { fetchPluginSourceFromSky } = require("./lib/plugin-url");
 
-const ROOT = __dirname;
-const PLUGINS_DIR = path.join(ROOT, "plugins");
-const DATA_DIR = path.join(ROOT, "data");
-const STATE_FILE = path.join(DATA_DIR, "plugins.json");
-const BUNDLES_FILE = path.join(DATA_DIR, "bundles.json");
-fs.mkdirSync(PLUGINS_DIR, { recursive: true }); // dev/test plugins; git ignores empty dirs
-fs.mkdirSync(DATA_DIR, { recursive: true });
-const PORT = process.env.PORT || 3999;
-const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS) || 10 * 60 * 1000;
-const META_CACHE_MAX = 200;
-// cap live plugin workers (each holds a ~64MB heap) — public install is
-// unauthenticated by design, so the blast radius of a spray is bounded
-const MAX_PLUGINS = Number(process.env.MAX_PLUGINS) || 60;
-// ids are slugs: [a-z0-9_-]; reject anything else from persisted state
-const ID_RE = /^[a-z0-9][a-z0-9_-]*$/;
-const DEFAULT_UA =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36";
+const PORT = Number(process.env.PORT) || 3000;
+const CACHE_TTL_MS = 30 * 60 * 1000; // getHome sections cache
+const META_FAST_MS = 3000; // Nuvio caps meta at 5s incl. connection — never wait longer
+const NEGATIVE_TTL_MS = 60 * 1000;
+const SOURCE_TTL_MS = 60 * 60 * 1000; // .sky source cache
+const META_TIMED_OUT = Symbol("meta.timed.out");
 
-let config = {};
-try {
-  config = JSON.parse(fs.readFileSync(path.join(ROOT, "config.json"), "utf8"));
-} catch (e) {
-  console.error("config.json missing/invalid:", e.message);
-}
+// ---------- config ----------
 
-// ---------- state: data/plugins.json ----------
-// Dashboard-managed runtime state. When GITHUB_TOKEN is set it's mirrored to
-// the repo's `state` branch and restored at boot — Render free tier wipes the
-// filesystem on redeploy and idle spin-down.
-let state = [];
-
-const GITHUB_REPO = process.env.GITHUB_REPO || config.githubRepo || "";
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN || "";
-const STATE_BRANCH = "state";
-const STATE_PATH = "data/plugins.json";
-
-function ghHeaders() {
-  return {
-    Authorization: "Bearer " + GITHUB_TOKEN,
-    "User-Agent": "plugin-host",
-    Accept: "application/vnd.github+json",
-  };
-}
-
-async function ensureStateBranch() {
-  const ref = await fetch(
-    "https://api.github.com/repos/" +
-      GITHUB_REPO +
-      "/git/ref/heads/" +
-      STATE_BRANCH,
-    { headers: ghHeaders() },
-  );
-  if (ref.ok) return;
-  const repo = await (
-    await fetch("https://api.github.com/repos/" + GITHUB_REPO, {
-      headers: ghHeaders(),
-    })
-  ).json();
-  if (!repo.default_branch)
-    throw new Error("github api: " + (repo.message || "repo lookup failed"));
-  const head = await (
-    await fetch(
-      "https://api.github.com/repos/" +
-        GITHUB_REPO +
-        "/git/ref/heads/" +
-        repo.default_branch,
-      { headers: ghHeaders() },
-    )
-  ).json();
-  if (!head.object)
-    throw new Error("github api: " + (head.message || "ref lookup failed"));
-  await fetch("https://api.github.com/repos/" + GITHUB_REPO + "/git/refs", {
-    method: "POST",
-    headers: ghHeaders(),
-    body: JSON.stringify({
-      ref: "refs/heads/" + STATE_BRANCH,
-      sha: head.object.sha,
-    }),
-  });
-}
-
-async function loadStateFromGithub() {
-  if (!GITHUB_TOKEN || !GITHUB_REPO) return false;
-  try {
-    const res = await fetch(
-      "https://api.github.com/repos/" +
-        GITHUB_REPO +
-        "/contents/" +
-        STATE_PATH +
-        "?ref=" +
-        STATE_BRANCH,
-      { headers: ghHeaders() },
-    );
-    if (!res.ok) return false;
-    const data = await res.json();
-    const parsed = JSON.parse(
-      Buffer.from(data.content, "base64").toString("utf8"),
-    );
-    if (Array.isArray(parsed) && parsed.length) {
-      state = parsed;
-      fs.mkdirSync(DATA_DIR, { recursive: true });
-      fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
-      console.log("restored", state.length, "plugins from GitHub state branch");
-      return true;
-    }
-  } catch (e) {
-    console.warn("github state load failed:", e.message);
+function loadConfig() {
+  for (const p of [
+    path.join(__dirname, "plugins.json"),
+    path.join(process.cwd(), "plugins.json"),
+  ]) {
+    try {
+      return JSON.parse(fs.readFileSync(p, "utf8"));
+    } catch (e) {}
   }
-  return false;
+  return [];
 }
+const CONFIG = loadConfig();
+const configById = new Map(CONFIG.map((e) => [e.id, e]));
 
-async function syncStateToGithub() {
-  if (!GITHUB_TOKEN || !GITHUB_REPO) return;
-  try {
-    await ensureStateBranch();
-    const content = Buffer.from(JSON.stringify(state, null, 2)).toString(
-      "base64",
-    );
-    const cur = await fetch(
-      "https://api.github.com/repos/" +
-        GITHUB_REPO +
-        "/contents/" +
-        STATE_PATH +
-        "?ref=" +
-        STATE_BRANCH,
-      { headers: ghHeaders() },
-    );
-    const sha = cur.ok ? (await cur.json()).sha : undefined;
-    const res = await fetch(
-      "https://api.github.com/repos/" + GITHUB_REPO + "/contents/" + STATE_PATH,
-      {
-        method: "PUT",
-        headers: ghHeaders(),
-        body: JSON.stringify({
-          message: "sync plugin state",
-          content,
-          sha,
-          branch: STATE_BRANCH,
-        }),
-      },
-    );
-    if (!res.ok) console.warn("github sync failed:", res.status);
-  } catch (e) {
-    console.warn("github sync failed:", e.message);
-  }
-}
-
-async function loadState() {
-  try {
-    state = JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
-    if (!Array.isArray(state)) state = [];
-    if (state.length) return;
-  } catch (e) {
-    state = [];
-  }
-  // disk wiped → GitHub mirror
-  await loadStateFromGithub();
-}
-
-function saveState() {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
-  syncStateToGithub(); // fire-and-forget; local state is already durable
-}
-
-// ---------- plugin registry ----------
-
-const plugins = new Map(); // id -> plugin
-const globalPool = { plugins, prefixMap: new Map() };
-
-function makePlugin(id, name, code, descriptor) {
-  return {
-    id,
-    name,
-    descriptor,
-    sections: new Map(),
-    sectionsTs: 0,
-    metaCache: new Map(),
-    status: "ok",
-    error: "",
-    runtime: new PluginRuntime(name, code, descriptor, {
-      verifyUA: descriptor.verifyUA || null,
-      storageFile: path.join(DATA_DIR, "storage", id + ".json"),
-    }),
-  };
-}
-
-function destroyPool(pool) {
-  for (const p of pool.plugins.values()) if (p.runtime) p.runtime.destroy();
-}
+// ---------- helpers ----------
 
 function publicBase(req) {
-  const configured = (process.env.PUBLIC_URL || config.publicUrl || "").replace(
-    /\/$/,
-    "",
-  );
-  // host-header poisoning guard: only trust the Host header when no canonical
-  // public URL is configured (dev mode); otherwise use the configured URL
+  const configured = (process.env.PUBLIC_URL || "").replace(/\/$/, "");
   if (configured) return configured;
   const host = String(req.headers.host || "localhost:" + PORT);
   const proto =
@@ -217,6 +49,18 @@ function publicBase(req) {
       ? "https"
       : "http";
   return proto + "://" + host.replace(/[^\w.:-]/g, "");
+}
+
+function sendJson(res, status, obj) {
+  const body = JSON.stringify(obj);
+  res.writeHead(status, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Content-Length": Buffer.byteLength(body),
+    "Cache-Control": "no-store",
+    "Access-Control-Allow-Origin": "*",
+    "X-Content-Type-Options": "nosniff",
+  });
+  res.end(body);
 }
 
 function slugify(s) {
@@ -228,17 +72,19 @@ function slugify(s) {
   );
 }
 
-function uniqueId(base) {
-  let id = base;
-  let n = 2;
-  while (plugins.has(id) || state.some((e) => e.id === id))
-    id = base + "-" + n++;
-  return id;
+// clients (Nuvio, Stremio) percent-encode the id exactly once — decode once.
+function decodeId(raw) {
+  try {
+    return decodeURIComponent(raw);
+  } catch (e) {
+    return raw;
+  }
 }
 
 const TYPE_MAP = {
   movie: "movie",
   movies: "movie",
+  film: "movie",
   series: "series",
   tv: "series",
   tvseries: "series",
@@ -269,8 +115,6 @@ const QUALITY_MAP = {
 function itemName(item) {
   return item.title || item.name || item.url || "Untitled";
 }
-// Stremio web runs on https: an http image URL (tmdb etc.) is blocked as
-// mixed content -> blank posters. Upgrade to https; hosts like tmdb serve it.
 function httpsImg(s) {
   return s ? String(s).replace(/^http:\/\//i, "https://") : s;
 }
@@ -280,9 +124,8 @@ function itemPoster(item) {
 
 function mapItem(item, sectionSlug) {
   let type = mapType(item.type);
-  // plugins often label every catalog row "movie" (vegamovies card() does)
-  // while the detail page is a series — a series-y section slug wins so the
-  // home board doesn't show series as movies (and vice versa stays as-is)
+  // plugins often label every catalog row "movie" while the detail page is a
+  // series — a series-y section slug wins so the home board shows it as series
   if (
     type === "movie" &&
     sectionSlug &&
@@ -291,8 +134,6 @@ function mapItem(item, sectionSlug) {
     )
   )
     type = "series";
-  // same single-episode rule as mapMeta: a "series" with exactly one episode
-  // is a movie (single-episode VOD); no episodes at all stays series
   const episodes = Array.isArray(item.episodes) ? item.episodes : [];
   if (type === "series" && episodes.length === 1) type = "movie";
   return {
@@ -319,9 +160,6 @@ function mapCast(item) {
     .filter((c) => c.name);
 }
 
-// normalize an episode's season/episode numbers the same way everywhere
-// (plugins leave them 0/undefined or as strings; the reference app defaults
-// season 0 -> 1 and numbers episodes from 1)
 function epNumbers(ep, i) {
   return {
     season: Number(ep.season) || 1,
@@ -329,10 +167,6 @@ function epNumbers(ep, i) {
   };
 }
 
-// Stremio's strict core (web/Android TV/Samsung/LG) requires `released` to be
-// a valid RFC3339 date — a bare year ("2024"), "15.01.2024", or a number
-// REJECTS the entire meta response (ERR_NO_META_FOUND, details page blank).
-// Normalize to ISO or omit entirely.
 function normalizeReleased(v) {
   if (v === undefined || v === null || v === "") return undefined;
   if (typeof v === "number") {
@@ -340,16 +174,13 @@ function normalizeReleased(v) {
     return isNaN(d) ? undefined : d.toISOString();
   }
   const s = String(v).trim();
-  if (/^\d{4}$/.test(s)) return s + "-01-01T00:00:00.000Z"; // bare year
+  if (/^\d{4}$/.test(s)) return s + "-01-01T00:00:00.000Z";
   const d = new Date(s);
   return isNaN(d.getTime()) ? undefined : d.toISOString();
 }
 
 function mapMeta(item) {
   const rawType = String(item.type || "").toLowerCase();
-  // trust an explicit movie/series label; only ambiguous types (anime/show/tv/
-  // unset) get resolved from episode count — a multi-part movie must not be
-  // forced into a series because it happens to have >1 episodes
   const isExplicitMovie =
     rawType === "movie" || rawType === "movies" || rawType === "film";
   const isExplicitSeries = [
@@ -366,22 +197,13 @@ function mapMeta(item) {
     if (episodes.length > 1) type = "series";
     else if (episodes.length === 1) type = "movie";
   }
-  // SkyStream parity: a series with exactly one episode is treated as a movie
-  // (single-episode VOD), and livestreams are movies too
+  // SkyStream parity: a series with exactly one episode is a movie (VOD)
   if (type === "series" && episodes.length === 1) type = "movie";
-  // build videos whenever the plugin provides episodes — SkyStream encodes
-  // movies as a single "Play Movie" episode (season 1, episode 1), and series
-  // plugins may label their type "tv"/"show"/"anime"/... or leave it unset
-  // (defaults to "movie"), so type alone must not gate episode rendering
   const videos = episodes
     .map((ep, i) => {
       const n = epNumbers(ep, i);
-      // Stremio builds the stream request from the video's id, so it must
-      // embed the meta id (item.url): /stream/<type>/<metaId>:<s>:<e>.json.
-      // A synthetic id like "e1x1" makes Stremio request /stream/.../e1x1.json
-      // which no plugin owns -> "no streams" even though the plugin works.
-      // Movies keep a plain id (no :s:e, no season/episode fields) so Stremio
-      // renders them as movies, not as S01E01 of a series.
+      // stream ids embed the meta id (item.url) so clients request
+      // /stream/.../<url>:<s>:<e>.json; movies keep a plain id
       const isMovie = type === "movie";
       return {
         id: isMovie ? item.url : item.url + ":" + n.season + ":" + n.episode,
@@ -393,8 +215,8 @@ function mapMeta(item) {
       };
     })
     .sort((a, b) => a.season - b.season || a.episode - b.episode);
-  // plugins may return streams directly without episodes — still give Stremio
-  // one playable video so the detail page loads and streams resolve
+  // plugins may return streams directly without episodes — still give the
+  // client one playable video so the detail page loads and streams resolve
   if (!videos.length && Array.isArray(item.streams) && item.streams.length) {
     videos.push({
       id: item.url,
@@ -414,67 +236,13 @@ function mapMeta(item) {
     description: item.description || "",
     releaseInfo: item.year ? String(item.year) : "",
     imdbRating: item.score != null ? String(item.score) : "",
-    // never pass through imdb_id: stremio-core treats it as a link to Cinemeta
-    // and merges that response into the detail page — on clients without
-    // Cinemeta (or for ids Cinemeta 404s) the merge fails and the page goes
-    // blank. Our meta is complete; clients must render it as-is.
     genres: item.tags || [],
     cast: mapCast(item),
     videos,
-    // movies: deep link straight to streams (skip the "Play" row tap)
     ...(type === "movie"
       ? { behaviorHints: { defaultVideoId: item.url } }
       : {}),
   };
-}
-
-function transformStreamUrl(url, base) {
-  if (typeof url !== "string") return url;
-  if (url.startsWith("MAGIC_PROXY_v2") || url.startsWith("MAGIC_PROXY_v1"))
-    return base + "/proxy/" + Buffer.from(url.slice(14)).toString("base64url");
-  if (url.startsWith("MAGIC_PROXY:"))
-    return base + "/proxy/" + Buffer.from(url.slice(12)).toString("base64url");
-  if (url.startsWith("magic_m3u8:"))
-    return base + "/proxy/" + Buffer.from(url.slice(11)).toString("base64url");
-  return url;
-}
-
-function mapStream(s, base, pluginName) {
-  const q = typeof s.quality === "number" ? QUALITY_MAP[s.quality] : s.quality;
-  const title = [s.source && s.source !== "Auto" ? s.source : "", q]
-    .filter(Boolean)
-    .join(" ")
-    .trim();
-  const url = transformStreamUrl(s.url, base);
-  const out = { url };
-  if (title) out.title = title;
-  // protocol: notWebReady=true unless the URL is a direct https MP4; mkv/m3u8
-  // (direct or proxied) must be handled by the native players, not the web one
-  const isDirectMp4 = /^https:\/\/.+\.mp4($|\?)/i.test(url);
-  out.behaviorHints = { notWebReady: !isDirectMp4 };
-  // plugins may require headers (Referer, cookies, app UA) to serve the file;
-  // Stremio players send no headers, so route those through our proxy
-  const streamHeaders =
-    s.headers && Object.keys(s.headers).length ? s.headers : null;
-  if (streamHeaders) {
-    out.url =
-      base +
-      "/proxy/" +
-      Buffer.from(
-        JSON.stringify({ url: s.url, headers: streamHeaders }),
-      ).toString("base64url");
-  }
-  const group = [pluginName, q || s.source].filter(Boolean).join("-");
-  if (group) out.behaviorHints.bingeGroup = group;
-  const fname = filenameFromUrl(s.url);
-  if (fname) out.behaviorHints.filename = fname; // subtitle addons match on this
-  if (Array.isArray(s.subtitles) && s.subtitles.length) {
-    out.subtitles = s.subtitles.map((sub) => ({
-      lang: sub.lang || sub.label || "en",
-      url: sub.url,
-    }));
-  }
-  return out;
 }
 
 function filenameFromUrl(u) {
@@ -489,99 +257,540 @@ function filenameFromUrl(u) {
   }
 }
 
-// ---------- plugin loading ----------
-
-async function loadFromState() {
-  for (const p of plugins.values()) if (p.runtime) p.runtime.destroy();
-  plugins.clear();
-  globalPool.prefixMap.clear();
-  // parallel: plugins are independent; sequential 15s timeouts would stall
-  // boot for minutes when an upstream is down
-  await Promise.all(
-    state.map(async (entry) => {
-      try {
-        // ids come from persisted state (file or `state` git branch) — reject
-        // anything that isn't a slug so a tampered entry can't traverse paths
-        if (!ID_RE.test(entry.id || "")) {
-          console.warn("skipping state entry with unsafe id:", entry.id);
-          return;
-        }
-        const { name, code, descriptor } = entry.url.endsWith(".sky")
-          ? await fetchPluginSourceFromSky(entry.url, entry.name || "")
-          : await fetchPluginSource(entry.url);
-        // multi-provider packages: re-inject the provider this entry represents
-        const full = entry.providerId
-          ? { ...descriptor, providerId: entry.providerId }
-          : descriptor;
-        const plugin = makePlugin(entry.id, name, code, full);
-        writePluginFiles(plugin, code, full);
-        plugins.set(entry.id, plugin);
-        console.log("loaded plugin:", entry.id);
-      } catch (e) {
-        console.warn("plugin", entry.id, "failed to load:", e.message);
-        plugins.set(entry.id, {
-          id: entry.id,
-          name: entry.name,
-          descriptor: {},
-          sections: new Map(),
-          sectionsTs: 0,
-          metaCache: new Map(),
-          status: "error",
-          error: e.message,
-          runtime: null,
-        });
-      }
-    }),
-  );
-  // dev/test: plugin dirs not managed by state (hot reload picks them up)
-  for (const entry of fs.readdirSync(PLUGINS_DIR, { withFileTypes: true })) {
-    if (!entry.isDirectory() || plugins.has(entry.name)) continue;
-    const jsPath = path.join(PLUGINS_DIR, entry.name, "plugin.js");
-    if (!fs.existsSync(jsPath)) continue;
-    let descriptor = {};
-    try {
-      descriptor = JSON.parse(
-        fs.readFileSync(
-          path.join(PLUGINS_DIR, entry.name, "plugin.json"),
-          "utf8",
-        ),
+// Streams are returned DIRECT (no proxy wrapper): the upstream CDNs serve
+// without special headers (verified for movieblast), so the player fetches
+// straight from the CDN — no server bandwidth, no response-size limits, works
+// on any host. Only m3u8 playlists go through the proxy: their segment lines
+// are MAGIC_PROXY-wrapped by the plugin and must be rewritten.
+function mapStream(s, base, pluginName) {
+  const q = typeof s.quality === "number" ? QUALITY_MAP[s.quality] : s.quality;
+  const title = [s.source && s.source !== "Auto" ? s.source : "", q]
+    .filter(Boolean)
+    .join(" ")
+    .trim();
+  let url = String(s.url || "");
+  if (/\.m3u8(\?|$)/i.test(url))
+    url =
+      base +
+      "/proxy/" +
+      Buffer.from(JSON.stringify({ url, headers: s.headers || {} })).toString(
+        "base64url",
       );
-    } catch (e) {}
-    const plugin = makePlugin(
-      entry.name,
-      entry.name,
-      fs.readFileSync(jsPath, "utf8"),
-      descriptor,
+  const out = { url };
+  if (title) out.title = title;
+  // protocol: notWebReady=true unless the URL is a direct https MP4
+  out.behaviorHints = {
+    notWebReady: !/^https:\/\/.+\.mp4($|\?)/i.test(url),
+  };
+  const group = [pluginName, q || s.source].filter(Boolean).join("-");
+  if (group) out.behaviorHints.bingeGroup = group;
+  const fname = filenameFromUrl(url);
+  if (fname) out.behaviorHints.filename = fname;
+  if (Array.isArray(s.subtitles) && s.subtitles.length) {
+    out.subtitles = s.subtitles.map((sub) => ({
+      lang: sub.lang || sub.label || "en",
+      url: sub.url,
+    }));
+  }
+  return out;
+}
+// ---------- plugin runtime (in-process vm sandbox) ----------
+
+// plugins are untrusted: never let them reach loopback/link-local/metadata
+async function httpRequest(method, url, headers, body) {
+  const DEFAULT_UA =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36";
+  const MAX_BODY_BYTES = 10 * 1024 * 1024;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 30000);
+  try {
+    const h = {};
+    if (headers)
+      for (const [k, v] of Object.entries(headers))
+        if (v !== undefined && v !== null) h[k] = String(v);
+    if (!h["User-Agent"] && !h["user-agent"]) h["User-Agent"] = DEFAULT_UA;
+    if (!h["Accept-Encoding"] && !h["accept-encoding"])
+      h["Accept-Encoding"] = "identity";
+    if (
+      (method === "POST" || method === "PUT") &&
+      body &&
+      !h["Content-Type"] &&
+      !h["content-type"]
+    )
+      h["Content-Type"] = "application/x-www-form-urlencoded";
+    let cur = url;
+    let finalUrl = url;
+    for (let hop = 0; hop < 5; hop++) {
+      let u;
+      try {
+        u = new URL(cur);
+      } catch (e) {
+        return {
+          code: 0,
+          statusCode: 0,
+          status: 0,
+          body: "",
+          error: "invalid url",
+        };
+      }
+      if (u.protocol !== "https:" && u.protocol !== "http:")
+        return {
+          code: 0,
+          statusCode: 0,
+          status: 0,
+          body: "",
+          error: "bad scheme",
+        };
+      if (await isPrivateHost(u.hostname))
+        return {
+          code: 0,
+          statusCode: 0,
+          status: 0,
+          body: "",
+          error: "blocked host",
+        };
+      const res = await fetch(cur, {
+        method,
+        headers: h,
+        body: body || undefined,
+        redirect: "manual",
+        signal: ctrl.signal,
+      });
+      if (res.status >= 300 && res.status < 400) {
+        const loc = res.headers.get("location");
+        if (!loc)
+          return {
+            code: 0,
+            statusCode: 0,
+            status: 0,
+            body: "",
+            error: "redirect without location",
+          };
+        cur = new URL(loc, cur).toString();
+        finalUrl = cur;
+        continue;
+      }
+      const len = Number(res.headers.get("content-length") || 0);
+      if (len > MAX_BODY_BYTES)
+        return {
+          code: 0,
+          statusCode: 0,
+          status: 0,
+          body: "",
+          error: "response too large",
+        };
+      const text = await res.text();
+      if (text.length > MAX_BODY_BYTES)
+        return {
+          code: 0,
+          statusCode: 0,
+          status: 0,
+          body: "",
+          error: "response too large",
+        };
+      const outHeaders = {};
+      res.headers.forEach((v, k) => {
+        outHeaders[k] = outHeaders[k] ? outHeaders[k] + "," + v : v;
+      });
+      return {
+        code: res.status,
+        statusCode: res.status,
+        status: res.status,
+        body: text,
+        headers: outHeaders,
+        finalUrl,
+      };
+    }
+    return {
+      code: 0,
+      statusCode: 0,
+      status: 0,
+      body: "",
+      error: "too many redirects",
+    };
+  } catch (e) {
+    return {
+      code: 0,
+      statusCode: 0,
+      status: 0,
+      body: "",
+      error: String((e && e.message) || e),
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function http_get(url, headers, cb) {
+  return httpRequest("GET", url, headers, null).then((res) => {
+    if (typeof cb === "function") cb(res);
+    return res;
+  });
+}
+function http_post(url, headers, body, cb) {
+  // legacy quirk preserved from the Dart host: (url, body, headers) form
+  if (
+    headers &&
+    typeof headers === "object" &&
+    !body &&
+    (headers.body !== undefined || headers.headers)
+  ) {
+    body = headers.body;
+    headers = headers.headers;
+  }
+  return httpRequest("POST", url, headers, body).then((res) => {
+    if (typeof cb === "function") cb(res);
+    return res;
+  });
+}
+function http_parallel(requests) {
+  return Promise.all(
+    (requests || [])
+      .slice(0, 10)
+      .map((r) =>
+        httpRequest(
+          (r && r.method) || "GET",
+          r && r.url,
+          (r && r.headers) || {},
+          r && r.body,
+        ),
+      ),
+  );
+}
+
+const webcrypto = {
+  async decryptAES(data, key, iv, options) {
+    const mode = (options && options.mode) || "cbc";
+    const keyBuf = Buffer.from(key, "base64");
+    const ivBuf = Buffer.from(iv || "", "base64");
+    const dataBuf = Buffer.from(data, "base64");
+    const decipher = crypto.createDecipheriv(
+      "aes-" + keyBuf.length * 8 + "-" + mode,
+      keyBuf,
+      ivBuf,
     );
-    plugin.dir = path.join(PLUGINS_DIR, entry.name);
-    plugins.set(entry.name, plugin);
-    console.log("loaded dev plugin:", entry.name);
+    return Buffer.concat([decipher.update(dataBuf), decipher.final()]).toString(
+      "utf8",
+    );
+  },
+  async pbkdf2(password, salt, iterations, keyLength) {
+    return new Promise((resolve, reject) => {
+      crypto.pbkdf2(
+        password,
+        Buffer.from(salt, "base64"),
+        iterations,
+        keyLength,
+        "sha256",
+        (e, k) => (e ? reject(e) : resolve(k.toString("base64"))),
+      );
+    });
+  },
+};
+
+// in-memory only: stateless by design (token-caching plugins re-mint per
+// instance; acceptable, keeps the bridge hostable on serverless)
+const storage = new Map();
+function get_storage(req) {
+  const v = storage.get(String((req && req.key) || ""));
+  return v === undefined ? null : v;
+}
+function set_storage(req) {
+  storage.set(String((req && req.key) || ""), String((req && req.value) ?? ""));
+  return true;
+}
+const prefs = new Map();
+function getPreference(key) {
+  return prefs.has(key) ? prefs.get(key) : "";
+}
+function setPreference(key, value) {
+  prefs.set(key, value);
+  return true;
+}
+
+function nativeRegex(text, pattern, group, caseSensitive) {
+  try {
+    const re = new RegExp(pattern, caseSensitive === false ? "gi" : "g");
+    const out = [];
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      out.push(m[group] !== undefined ? m[group] : m[0]);
+      if (m[0] === "") re.lastIndex++;
+    }
+    return out;
+  } catch (e) {
+    return [];
+  }
+}
+function extractPath(cur, parts) {
+  for (const part of parts) {
+    const idxM = /^(.*)\[(\d+)\]$/.exec(part);
+    if (idxM) {
+      cur = cur && cur[idxM[1]] ? cur[idxM[1]][+idxM[2]] : undefined;
+      continue;
+    }
+    if (part.endsWith("[*]")) {
+      cur = cur && cur[part.slice(0, -3)];
+      continue;
+    }
+    cur = cur ? cur[part] : undefined;
+  }
+  return cur;
+}
+function nativeJsonExtract(jsonStr, paths) {
+  let obj;
+  try {
+    obj = JSON.parse(jsonStr);
+  } catch (e) {
+    return [];
+  }
+  return (paths || []).map((p) => {
+    const v = extractPath(obj, String(p).split("."));
+    return v === undefined ? null : v;
+  });
+}
+function nativeMd5(s) {
+  return crypto.createHash("md5").update(String(s)).digest("hex");
+}
+function nativeSha256(s) {
+  return crypto.createHash("sha256").update(String(s)).digest("hex");
+}
+
+class Actor {
+  constructor(p) {
+    Object.assign(this, p);
+  }
+}
+class Trailer {
+  constructor(p) {
+    Object.assign(this, p);
+  }
+}
+class NextAiring {
+  constructor(p) {
+    Object.assign(this, p);
+  }
+}
+class SubtitleFile {
+  constructor(p) {
+    Object.assign(this, p);
+  }
+}
+class MultimediaItem {
+  constructor(params) {
+    Object.assign(this, {
+      type: "movie",
+      status: "ongoing",
+      playbackPolicy: "none",
+      isAdult: false,
+      streams: [],
+      syncData: {},
+      ...params,
+    });
+  }
+}
+class Episode {
+  constructor(params) {
+    Object.assign(this, {
+      season: 0,
+      episode: 0,
+      dubStatus: "none",
+      playbackPolicy: "none",
+      streams: [],
+      ...params,
+    });
+  }
+}
+class StreamResult {
+  constructor(p = {}) {
+    this.url = p.url;
+    this.source = p.source || "Auto";
+    this.headers = p.headers;
+    this.subtitles = p.subtitles;
+    this.drmKid = p.drmKid;
+    this.drmKey = p.drmKey;
+    this.licenseUrl = p.licenseUrl;
   }
 }
 
-function writePluginFiles(plugin, code, descriptor) {
-  plugin.dir = path.join(PLUGINS_DIR, plugin.id);
-  fs.mkdirSync(plugin.dir, { recursive: true });
-  const jsPath = path.join(plugin.dir, "plugin.js");
-  fs.writeFileSync(jsPath, code);
-  const jsonPath = path.join(plugin.dir, "plugin.json");
-  if (descriptor && Object.keys(descriptor).length) {
-    fs.writeFileSync(jsonPath, JSON.stringify(descriptor, null, 2));
-    selfWritten.add(jsonPath);
-  }
-  selfWritten.add(jsPath);
-  lastSelfWrite = Date.now(); // management-API writes manage state directly — no hot reload
+function buildContext(code, descriptor) {
+  const sandbox = {
+    console: {
+      log: (...a) => console.log("[plugin]", ...a),
+      error: (...a) => console.error("[plugin]", ...a),
+      warn: (...a) => console.warn("[plugin]", ...a),
+    },
+    Buffer,
+    atob,
+    btoa,
+    TextDecoder,
+    TextEncoder,
+    URL,
+    URLSearchParams,
+    setTimeout,
+    clearTimeout,
+    setInterval,
+    clearInterval,
+    manifest: descriptor || {},
+    CloudStream: { getLanguage: () => "en", getRegion: () => "US" },
+    Actor,
+    Trailer,
+    NextAiring,
+    SubtitleFile,
+    MultimediaItem,
+    Episode,
+    StreamResult,
+    http_get,
+    http_post,
+    http_parallel,
+    crypto: webcrypto,
+    getAndUnpack: (js) => unpackJs(String(js)),
+    parseHtml: (html) => Promise.resolve(parseHtml(html)),
+    parse_html: (html, selector, attr) =>
+      Promise.resolve(parse_html(html, selector, attr)),
+    getPreference,
+    setPreference,
+    get_storage,
+    set_storage,
+    nativeRegex,
+    nativeJsonExtract,
+    nativeMd5,
+    nativeSha256,
+  };
+  sandbox.global = sandbox;
+  const ctx = vm.createContext(sandbox);
+  vm.runInContext(code, ctx, { timeout: 10000 });
+  return ctx;
 }
 
-async function warmPlugin(plugin, pool) {
-  if (!plugin.runtime) return;
+// call a plugin global that takes a callback (and may also return a promise)
+function invoke(ctx, fn, args) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (ok, value, error) => {
+      if (!settled) {
+        settled = true;
+        resolve({ ok, value, error });
+      }
+    };
+    try {
+      const result = fn(...args, (v) =>
+        finish(true, v === undefined ? "__dart_void__" : v),
+      );
+      if (result && typeof result.then === "function") {
+        result.then(
+          (v) => {
+            if (v !== undefined) finish(true, v);
+          },
+          (e) => finish(false, undefined, String((e && e.message) || e)),
+        );
+      }
+    } catch (e) {
+      finish(false, undefined, String((e && e.message) || e));
+    }
+  });
+}
+
+function normalizeResult(value) {
+  if (value === undefined || value === null || value === "__dart_void__")
+    return { success: true, data: undefined };
+  if (typeof value === "object" && !Array.isArray(value)) {
+    if (value.success === false)
+      return {
+        success: false,
+        message:
+          value.message || value.error || value.errorCode || "plugin error",
+      };
+    if (value.success === true) return { success: true, data: value.data };
+  }
+  return { success: true, data: value };
+}
+
+function callPlugin(plugin, fn, args) {
+  const f = plugin.ctx[fn];
+  if (typeof f !== "function")
+    return Promise.resolve({
+      success: false,
+      message: "Function " + fn + " not found",
+    });
+  return invoke(plugin.ctx, f, args || []).then((r) =>
+    r.ok ? normalizeResult(r.value) : { success: false, message: r.error },
+  );
+}
+
+// ---------- plugin lifecycle ----------
+
+const sourceCache = new Map(); // url -> {code, descriptor, ts}
+async function loadSource(url) {
+  const cached = sourceCache.get(url);
+  if (cached && Date.now() - cached.ts < SOURCE_TTL_MS) return cached;
+  const { name, code, descriptor } = await fetchPluginSourceFromSky(url, "");
+  const src = { code, descriptor, ts: Date.now() };
+  sourceCache.set(url, src);
+  return src;
+}
+
+const pluginsByKey = new Map(); // slug or b64-key -> plugin
+function makePlugin(entry) {
+  const p = {
+    id: entry.id,
+    name: entry.name || entry.id,
+    url: entry.url,
+    providerId: entry.providerId,
+    descriptor: {},
+    ctx: null,
+    sections: new Map(),
+    sectionsTs: 0,
+    metaCache: new Map(),
+    catalogIndex: new Map(),
+    pendingLoads: new Map(),
+    warming: null,
+    status: "loading",
+    error: "",
+  };
+  pluginsByKey.set(entry.id, p);
+  return p;
+}
+
+function pluginForKey(key) {
+  let p = pluginsByKey.get(key);
+  if (p) return p;
+  const entry = configById.get(key);
+  if (entry) return makePlugin(entry);
+  // b64 form: key is base64url of the plugin .sky URL
+  try {
+    const url = Buffer.from(key, "base64url").toString("utf8");
+    if (/^https?:\/\//.test(url)) return makePlugin({ id: key, url });
+  } catch (e) {}
+  return null;
+}
+
+async function ensureRuntime(plugin) {
+  if (plugin.ctx) return null;
+  try {
+    const { code, descriptor } = await loadSource(plugin.url);
+    plugin.descriptor = plugin.providerId
+      ? { ...descriptor, providerId: plugin.providerId }
+      : descriptor;
+    plugin.ctx = buildContext(String(code), plugin.descriptor);
+    plugin.status = "ok";
+    return null;
+  } catch (e) {
+    plugin.status = "error";
+    plugin.error = String((e && e.message) || e);
+    return plugin.error;
+  }
+}
+
+async function warmPlugin(plugin) {
   if (plugin.warming) return plugin.warming;
+  await ensureRuntime(plugin);
+  if (!plugin.ctx) return null;
   plugin.warming = (async () => {
     if (plugin.sectionsTs && Date.now() - plugin.sectionsTs < CACHE_TTL_MS)
       return;
-    const res = await callPlugin(plugin.runtime, "getHome", []);
+    const res = await callPlugin(plugin, "getHome", []);
     if (!res.success || !res.data || typeof res.data !== "object") {
-      plugin.sectionsTs = Date.now(); // cache the failure so catalogs don't re-call on every request
+      plugin.sectionsTs = Date.now(); // cache the failure so catalogs don't re-call every request
       plugin.status = "error";
       plugin.error = res.message || "getHome failed";
       console.warn(
@@ -590,7 +799,7 @@ async function warmPlugin(plugin, pool) {
         "getHome failed:",
         res.message || "no data",
       );
-      return; // keep existing sections — stale catalogs beat empty ones
+      return;
     }
     const sectionMap = Array.isArray(res.data)
       ? { [plugin.descriptor.name || plugin.name]: res.data }
@@ -598,15 +807,17 @@ async function warmPlugin(plugin, pool) {
     const built = new Map();
     for (const [name, items] of Object.entries(sectionMap)) {
       if (!Array.isArray(items) || !items.length) continue;
-      // plugins sometimes sprinkle null/undefined into their lists; a null
-      // entry used to crash warmPlugin -> killed the whole server on add
+      // plugins sometimes sprinkle null/undefined into their lists
       const clean = items.filter((i) => i && typeof i === "object");
       if (!clean.length) continue;
-      const firstType = mapType(clean[0].type);
-      built.set(slugify(name), { name, type: firstType, items: clean });
+      built.set(slugify(name), {
+        name,
+        type: mapType(clean[0].type),
+        items: clean,
+      });
     }
     if (!built.size) {
-      // no sections (flaky/blocked upstream) — keep existing catalogs, stale beats empty
+      // no sections (flaky/blocked upstream) — keep existing, stale beats empty
       plugin.sectionsTs = Date.now();
       plugin.status = "error";
       plugin.error = "getHome returned no sections";
@@ -614,8 +825,7 @@ async function warmPlugin(plugin, pool) {
       return;
     }
     // merge, don't replace: plugins drop sections whose page fetch failed at
-    // warm time, so a transient upstream failure would shrink the catalog list
-    // until the next good warm — keep stale sections, fresh ones win
+    // warm time — keep stale sections, fresh ones win
     for (const [slug, section] of plugin.sections) {
       if (!built.has(slug)) built.set(slug, section);
     }
@@ -624,7 +834,6 @@ async function warmPlugin(plugin, pool) {
     plugin.sectionsTs = Date.now();
     plugin.status = "ok";
     plugin.error = "";
-    rebuildPrefixMap(pool);
     console.log(
       "plugin",
       plugin.name,
@@ -637,233 +846,23 @@ async function warmPlugin(plugin, pool) {
   return plugin.warming;
 }
 
-async function warmAll() {
-  await Promise.all(
-    [...plugins.values()].map((p) =>
-      warmPlugin(p, globalPool).catch((e) =>
-        console.warn("warm", p.name, "failed:", e.message),
-      ),
-    ),
-  );
-}
-
-function rebuildPrefixMap(pool) {
-  pool.prefixMap.clear();
-  for (const p of pool.plugins.values()) {
-    if (p.descriptor.idPrefix)
-      pool.prefixMap.set(
-        String(p.descriptor.idPrefix).replace(/\/$/, ""),
-        p.id,
-      );
-    for (const { items } of p.sections.values()) {
-      for (const item of items) {
-        if (!item.url || typeof item.url !== "string") continue;
-        try {
-          const origin = new URL(item.url).origin;
-          pool.prefixMap.set(origin, p.id);
-        } catch (e) {}
-      }
-    }
-  }
-}
-
-function pluginForId(id, pool) {
-  if (!id || typeof id !== "string") return null;
-  let best = null;
-  for (const [prefix, name] of pool.prefixMap) {
-    if (id.startsWith(prefix) && (!best || prefix.length > best.prefix.length))
-      best = { prefix, name };
-  }
-  if (best) return pool.plugins.get(best.name);
-  if (pool.plugins.size === 1) return [...pool.plugins.values()][0];
-  return null;
-}
-
-// Some plugins use non-URL item ids (castle://media/..., JSON blobs like
-// {"mode":"tmdb",...}) that no prefix can route. Probe: fire load(id) at all
-// plugins in parallel, first one that returns a valid item wins. Result is
-// cached per id (positive + short negative) so repeat requests are instant.
-const probeCache = new Map(); // id -> { pluginId, ts } | { miss: true, ts }
-const PROBE_TIMEOUT_MS = 15000;
-const PROBE_NEGATIVE_TTL_MS = 60000;
-// a failed load() is often transient (Cloudflare challenge, upstream hiccup) —
-// negative-cache it briefly so the next tap retries instead of 404ing for the
-// full CACHE_TTL_MS
-const NEGATIVE_TTL_MS = 30000;
-const PROBE_CACHE_MAX = 500;
-
-function probeCachePut(id, value) {
-  if (probeCache.size >= PROBE_CACHE_MAX) {
-    let oldestKey = null,
-      oldestTs = Infinity;
-    for (const [k, v] of probeCache) {
-      if (v.ts < oldestTs) {
-        oldestTs = v.ts;
-        oldestKey = k;
-      }
-    }
-    if (oldestKey) probeCache.delete(oldestKey);
-  }
-  probeCache.set(id, value);
-}
-
-async function probePluginForId(id, pool) {
-  const isGlobal = pool === globalPool;
-  const cached = isGlobal ? probeCache.get(id) : null;
-  if (cached) {
-    if (cached.pluginId) {
-      const p = pool.plugins.get(cached.pluginId);
-      if (p) return p;
-    } else if (Date.now() - cached.ts < PROBE_NEGATIVE_TTL_MS) {
-      return null;
-    }
-  }
-  // deterministic first: the owning plugin's catalog contains this exact item
-  for (const p of pool.plugins.values()) {
-    for (const section of p.sections.values()) {
-      if (section.items.some((it) => it && it.url === id)) {
-        probeCachePut(id, { pluginId: p.id, ts: Date.now() });
-        return p;
-      }
-    }
-  }
-  const candidates = [...pool.plugins.values()].filter((p) => p.runtime);
-  if (!candidates.length) return null;
-  // fallback: fire load(id) at all plugins; a strong match (the plugin's own
-  // item url equals the requested id) resolves immediately — a few slow or
-  // Cloudflare-blocked plugins must not block the whole probe until timeout
-  const score = (h) =>
-    (h.d.url === id ? 4 : 0) +
-    (Array.isArray(h.d.episodes) && h.d.episodes.length ? 2 : 0) +
-    (Array.isArray(h.d.streams) && h.d.streams.length ? 2 : 0) +
-    (h.d.name && h.d.name !== "No Title" && h.d.name !== "Untitled" ? 1 : 0);
-  const probeAll = new Promise((resolve) => {
-    const hits = [];
-    let settled = 0;
-    const finish = () => {
-      if (!hits.length) return resolve(null);
-      hits.sort((a, b) => score(b) - score(a));
-      resolve(hits[0].p);
-    };
-    for (const p of candidates) {
-      callPlugin(p.runtime, "load", [id])
-        .then((res) => {
-          if (res.success && res.data && typeof res.data === "object") {
-            const h = { p, d: res.data };
-            if (h.d.url === id) return resolve(p); // exact owner — done
-            hits.push(h);
-          }
-          if (++settled === candidates.length) finish();
-        })
-        .catch(() => {
-          if (++settled === candidates.length) finish();
-        });
-    }
-  });
-  const winner = await Promise.race([
-    probeAll,
-    new Promise((res) => setTimeout(() => res(null), PROBE_TIMEOUT_MS)),
-  ]);
-  if (isGlobal)
-    probeCachePut(
-      id,
-      winner
-        ? { pluginId: winner.id, ts: Date.now() }
-        : { miss: true, ts: Date.now() },
-    );
-  return winner;
-}
-
-function catalogList(pool) {
-  const multi = pool.plugins.size > 1;
-  const out = [];
-  for (const p of pool.plugins.values()) {
-    const label = p.descriptor.name || p.name;
-    const prefix = p.descriptor.catalogPrefix || p.name;
-    const extras = [
-      { name: "skip", options: ["0", "1", "2", "3"] },
-      { name: "genre", options: [] },
-    ];
-    if (p.sections.size === 0) {
-      // not warmed yet: advertise the descriptor's declared catalogs so the
-      // addon is visible immediately (a slow/failing getHome must not hide it)
-      for (const c of p.descriptor.catalogs || []) {
-        out.push({
-          id: c.id || prefix + "_" + (c.name || slugify(c.id || "")),
-          type: c.type || "movie",
-          name: multi ? label + " • " + (c.name || c.id) : c.name || c.id,
-          extra: extras,
-        });
-      }
-      continue;
-    }
-    for (const [slug, section] of p.sections) {
-      out.push({
-        id: prefix + "_" + slug,
-        type: section.type,
-        name: multi ? label + " • " + section.name : section.name,
-        // board-compatible: without `extra` Stremio's home board shows
-        // "No home rows available ... without required extras"
-        extra: extras,
-      });
-    }
-  }
-  return out;
-}
-
-function findCatalog(pool, catalogId) {
-  for (const p of pool.plugins.values()) {
-    const prefix = p.descriptor.catalogPrefix || p.name;
-    if (catalogId.startsWith(prefix + "_")) {
-      const slug = catalogId.slice(prefix.length + 1);
-      const section = p.sections.get(slug);
-      if (section) return { plugin: p, section, slug };
-    }
-    // descriptor-declared catalog (pre-warm fallback): match by exact id
-    const decl = (p.descriptor.catalogs || []).find((c) => c.id === catalogId);
-    if (decl) return { plugin: p, section: null, slug: decl.id };
-  }
-  return null;
-}
-
-// single-plugin pool for a plugin's own addon URL
-function poolFor(plugin) {
-  const pool = {
-    plugins: new Map([[plugin.id, plugin]]),
-    prefixMap: new Map(),
-  };
-  rebuildPrefixMap(pool);
-  return pool;
-}
-
 function cachePut(map, key, ts, value, ttl) {
-  if (map.size >= META_CACHE_MAX) {
-    let oldestKey = null,
-      oldestTs = Infinity;
-    for (const [k, v] of map) {
-      if (v.ts < oldestTs) {
-        oldestTs = v.ts;
-        oldestKey = k;
-      }
-    }
-    if (oldestKey) map.delete(oldestKey);
-  }
   map.set(key, { ts, value, ttl });
+  if (map.size > 5000) {
+    const oldest = [...map.entries()].sort((a, b) => a[1].ts - b[1].ts)[0];
+    map.delete(oldest[0]);
+  }
 }
-
-const META_TIMED_OUT = Symbol("meta-timed-out");
 
 async function getRawItem(plugin, metaId, timeoutMs) {
-  if (!plugin.runtime) return null;
+  if (!plugin.ctx) return null;
   const cached = plugin.metaCache.get(metaId);
   const ttl = cached && cached.ttl ? cached.ttl : CACHE_TTL_MS;
   if (cached && Date.now() - cached.ts < ttl) return cached.value;
-  // one in-flight load per id: the fast meta path and the follow-up stream
-  // request must share the same call, not start a second slow upstream fetch
-  if (!plugin.pendingLoads) plugin.pendingLoads = new Map();
+  // one in-flight load per id: fast meta and follow-up stream share the call
   let load = plugin.pendingLoads.get(metaId);
   if (!load) {
-    load = callPlugin(plugin.runtime, "load", [metaId]);
+    load = callPlugin(plugin, "load", [metaId]);
     plugin.pendingLoads.set(metaId, load);
     load
       .then((res) => {
@@ -883,549 +882,13 @@ async function getRawItem(plugin, metaId, timeoutMs) {
     : await load;
   if (res === META_TIMED_OUT) return null; // load still running; no negative cache
   if (!res.success || !res.data || typeof res.data !== "object") {
-    // negative cache: a dead id must not re-trigger the full slow load on
-    // every stream/meta request — but keep it short so a transient upstream
-    // failure (Cloudflare challenge) recovers on the next tap
+    // negative cache: a dead id must not re-trigger the full slow load — but
+    // keep it short so a transient upstream failure recovers on the next tap
     cachePut(plugin.metaCache, metaId, Date.now(), null, NEGATIVE_TTL_MS);
     return null;
   }
   return res.data;
 }
-
-// ---------- helpers ----------
-
-function sendJson(res, status, obj) {
-  const body = JSON.stringify(obj);
-  res.writeHead(status, {
-    "Content-Type": "application/json; charset=utf-8",
-    "Content-Length": Buffer.byteLength(body),
-    "Cache-Control": "no-store",
-    "X-Content-Type-Options": "nosniff",
-  });
-  res.end(body);
-}
-
-async function readBody(req, maxBytes) {
-  const chunks = [];
-  let size = 0;
-  for await (const c of req) {
-    size += c.length;
-    if (size > maxBytes) throw new Error("body too large");
-    chunks.push(c);
-  }
-  return Buffer.concat(chunks).toString("utf8");
-}
-
-// ---------- management API ----------
-
-function publicPlugin(entry, req) {
-  const p = plugins.get(entry.id);
-  const out = {
-    id: entry.id,
-    name: entry.name,
-    url: entry.url,
-    status: p ? p.status : "error",
-    error: p ? p.error : "not loaded",
-    catalogs: [],
-    addonUrl: publicBase(req) + "/" + entry.id + "/manifest.json",
-    addedAt: entry.addedAt,
-  };
-  if (p) {
-    const prefix = p.descriptor.catalogPrefix || p.name;
-    out.catalogs = [...p.sections.entries()].map(([slug, s]) => ({
-      id: prefix + "_" + slug,
-      type: s.type,
-      name: s.name,
-    }));
-  }
-  return out;
-}
-
-function handleListPlugins(req, res) {
-  sendJson(res, 200, { plugins: state.map((e) => publicPlugin(e, req)) });
-}
-
-// ---------- bundles: unique addon URLs for a user's plugin selection ----------
-
-let bundles = []; // {id, pluginIds, createdAt}
-
-// repo plugins registered by the client (POST /api/repos): slug -> {url, name}
-const REPO_PLUGINS_FILE = path.join(DATA_DIR, "repo-plugins.json");
-const repoPlugins = new Map();
-
-function loadRepoPlugins() {
-  try {
-    const d = JSON.parse(fs.readFileSync(REPO_PLUGINS_FILE, "utf8"));
-    if (d && typeof d === "object")
-      for (const [k, v] of Object.entries(d)) repoPlugins.set(k, v);
-  } catch (e) {
-    // no registry yet
-  }
-}
-
-function saveRepoPlugins() {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  fs.writeFileSync(
-    REPO_PLUGINS_FILE,
-    JSON.stringify(Object.fromEntries(repoPlugins), null, 2),
-  );
-}
-
-// seed the repo registry from plugins.txt (one repo.json URL per line) —
-// survives disk wipes: every listed plugin's /<slug>/ URL keeps working.
-// Skipped when the registry already exists (normal restart): the persisted
-// registry is authoritative and boot stays fast (no 12 GitHub fetches).
-async function seedReposFromFile() {
-  if (repoPlugins.size) return;
-  let lines = [];
-  try {
-    lines = fs
-      .readFileSync(path.join(ROOT, "plugins.txt"), "utf8")
-      .split("\n")
-      .map((s) => s.trim())
-      .filter((s) => s && !s.startsWith("#"));
-  } catch (e) {
-    return; // no plugins.txt — dashboard-managed repos only
-  }
-  await Promise.allSettled(
-    lines.map(async (url) => {
-      try {
-        const list = await fetchRepoPlugins(url);
-        for (const p of list.plugins)
-          repoPlugins.set(slugify(p.name), { url: p.url, name: p.name });
-        console.log(
-          "seeded repo:",
-          list.name,
-          "(" + list.plugins.length + " plugins)",
-        );
-      } catch (e) {
-        console.warn("repo seed failed:", url, "-", e.message);
-      }
-    }),
-  );
-  saveRepoPlugins();
-}
-
-function loadBundles() {
-  try {
-    bundles = JSON.parse(fs.readFileSync(BUNDLES_FILE, "utf8"));
-    if (!Array.isArray(bundles)) bundles = [];
-  } catch (e) {
-    bundles = [];
-  }
-  pruneBundles();
-}
-
-function saveBundles() {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  fs.writeFileSync(BUNDLES_FILE, JSON.stringify(bundles, null, 2));
-}
-
-function pruneBundles() {
-  for (const b of bundles)
-    b.pluginIds = b.pluginIds.filter((x) => plugins.has(x));
-  bundles = bundles.filter((b) => b.pluginIds.length);
-}
-
-function bundlePool(b) {
-  const pool = { plugins: new Map(), prefixMap: new Map() };
-  for (const id of b.pluginIds) {
-    const p = plugins.get(id);
-    if (p) pool.plugins.set(id, p);
-  }
-  rebuildPrefixMap(pool);
-  return pool;
-}
-
-// stable id for a stateless bundle: same selection -> same id, forever
-function autoBundleId(urls) {
-  return crypto
-    .createHash("sha1")
-    .update(urls.join("\n"))
-    .digest("hex")
-    .slice(0, 8);
-}
-
-function serveBundleDispatch(req, res, pool, manifestId, rest, query) {
-  if (rest === "/manifest.json")
-    return sendJson(res, 200, manifest(pool, req, manifestId));
-  const proxyM = /^\/proxy\/(.+)$/.exec(rest);
-  if (proxyM) return handleProxy(req, res, proxyM[1]);
-  const catM = /^\/catalog\/(movie|series)\/([^/]+)(?:\/[^/]+)?\.json$/.exec(
-    rest,
-  );
-  if (catM)
-    return handleCatalog(
-      req,
-      res,
-      catM[1],
-      decodeId(catM[2]),
-      query.get("search"),
-      pool,
-    );
-  const metaM = /^\/meta\/(movie|series)\/(.+)\.json$/.exec(rest);
-  if (metaM) return handleMeta(req, res, metaM[1], decodeId(metaM[2]), pool);
-  const streamM = /^\/stream\/(movie|series)\/(.+)\.json$/.exec(rest);
-  if (streamM)
-    return handleStream(
-      req,
-      res,
-      streamM[1],
-      decodeId(streamM[2]),
-      pool,
-      publicBase(req),
-    );
-  return sendJson(res, 404, { error: "not found" });
-}
-
-function publicBundle(b, req) {
-  return {
-    id: b.id,
-    pluginIds: b.pluginIds,
-    // deterministic name-based URL: same selection → same link
-    url: publicBase(req) + "/" + b.pluginIds.join("-") + "/manifest.json",
-    createdAt: b.createdAt,
-  };
-}
-
-function handleListBundles(req, res) {
-  sendJson(res, 200, { bundles: bundles.map((b) => publicBundle(b, req)) });
-}
-
-async function handleAddBundle(req, res) {
-  let body;
-  try {
-    body = JSON.parse(await readBody(req, 16384));
-  } catch (e) {
-    return sendJson(res, 400, { error: "bad json body" });
-  }
-  // stateless bundle: client passes manifest URLs; plugins are installed now
-  // (state survives wipes via the GitHub mirror), and the returned URL is the
-  // deterministic name-based form /slug1-slug2-.../manifest.json
-  if (Array.isArray(body && body.urls)) {
-    const urls = body.urls
-      .filter((u) => typeof u === "string" && u.trim())
-      .slice(0, 20); // cap hostile payloads; bundles of 3-5 are the norm
-    if (!urls.length) return sendJson(res, 400, { error: "no plugin urls" });
-    const ids = [];
-    for (const u of urls) {
-      try {
-        ids.push(await installPluginFromUrl(u));
-      } catch (e) {
-        console.warn("bundle skip", u, "-", e.message);
-      }
-    }
-    if (!ids.length)
-      return sendJson(res, 400, { error: "no installable plugins" });
-    return sendJson(res, 201, {
-      bundle: {
-        id: autoBundleId(urls),
-        urls,
-        stateless: true,
-        url: publicBase(req) + "/" + ids.join("-") + "/manifest.json",
-      },
-    });
-  }
-  const ids = Array.isArray(body && body.pluginIds)
-    ? body.pluginIds.filter((id) => typeof id === "string" && plugins.has(id))
-    : [];
-  if (!ids.length) return sendJson(res, 400, { error: "no valid plugin ids" });
-  const b = {
-    id: crypto.randomBytes(8).toString("hex"),
-    pluginIds: ids,
-    createdAt: Date.now(),
-  };
-  bundles.push(b);
-  saveBundles();
-  sendJson(res, 201, { bundle: publicBundle(b, req) });
-}
-
-function handleDeleteBundle(req, res, id) {
-  const i = bundles.findIndex((b) => b.id === id);
-  if (i === -1) return sendJson(res, 200, { ok: true }); // already pruned — idempotent
-  bundles.splice(i, 1);
-  saveBundles();
-  sendJson(res, 200, { ok: true });
-}
-
-// install a plugin from its manifest url (idempotent: reuses the installed
-// entry when present). Shared by POST /api/plugins and stateless bundles.
-const installing = new Map(); // url -> Promise<id>, single-flight per url
-// installs are rare and id allocation + state push must be atomic (two
-// different URLs with the same plugin name would otherwise collide on the id)
-let installChain = Promise.resolve();
-function withInstallLock(fn) {
-  const run = installChain.then(fn, fn);
-  installChain = run.catch(() => {});
-  return run;
-}
-async function installPluginFromUrl(url, name = "") {
-  const existing = state.find((e) => e.url === url);
-  if (existing && plugins.has(existing.id)) return existing.id;
-  if (installing.has(url)) return installing.get(url);
-  const job = withInstallLock(async () => {
-    // re-check under the lock: a concurrent install of the same url may have
-    // completed while we waited
-    const done = state.find((e) => e.url === url);
-    if (done && plugins.has(done.id)) return done.id;
-    const source = url.endsWith(".sky")
-      ? await fetchPluginSourceFromSky(url, name)
-      : await fetchPluginSource(url);
-    const providers =
-      Array.isArray(source.descriptor.providers) &&
-      source.descriptor.providers.length
-        ? source.descriptor.providers
-        : null;
-    if (providers) {
-      // multi-provider package (netmirror/vegamovies/piratexplay style): one
-      // addon per provider, ALL enabled by default — SkyStream parity. The
-      // plugin reads manifest.providerId to pick its source.
-      const seen = new Set();
-      const ids = [];
-      for (const p of providers) {
-        if (!p || !p.id || seen.has(p.id)) continue;
-        seen.add(p.id);
-        if (plugins.size >= MAX_PLUGINS) {
-          console.warn(
-            "max plugins (" + MAX_PLUGINS + ") reached, skipping",
-            p.id,
-          );
-          break;
-        }
-        const pname = p.name || source.name + " " + p.id;
-        const baseId = slugify(source.name) + "-" + slugify(p.id);
-        const id = uniqueId(baseId);
-        const descriptor = { ...source.descriptor, providerId: p.id };
-        const plugin = makePlugin(id, pname, source.code, descriptor);
-        const pool = poolFor(plugin);
-        await warmPlugin(plugin, pool).catch((e) => {
-          plugin.status = "error";
-          plugin.error = e.message;
-          console.warn("warm", plugin.name, "failed:", e.message);
-        });
-        writePluginFiles(plugin, source.code, descriptor);
-        state.push({
-          id,
-          name: pname,
-          url,
-          providerId: p.id,
-          addedAt: Date.now(),
-        });
-        saveState();
-        plugins.set(id, plugin);
-        ids.push(id);
-        console.log("added plugin:", id, "(provider:", p.id + ") <-", url);
-      }
-      rebuildPrefixMap(globalPool);
-      if (!ids.length) throw new Error("no providers could be installed");
-      return ids[0];
-    }
-    if (plugins.size >= MAX_PLUGINS)
-      throw new Error("max plugins (" + MAX_PLUGINS + ") reached");
-    const id = uniqueId(slugify(source.name));
-    const plugin = makePlugin(id, source.name, source.code, source.descriptor);
-    const pool = poolFor(plugin);
-    await warmPlugin(plugin, pool).catch((e) => {
-      plugin.status = "error";
-      plugin.error = e.message;
-      console.warn("warm", plugin.name, "failed:", e.message);
-    });
-    writePluginFiles(plugin, source.code, source.descriptor);
-    state.push({ id, name: source.name, url, addedAt: Date.now() });
-    saveState();
-    plugins.set(id, plugin);
-    rebuildPrefixMap(globalPool);
-    console.log("added plugin:", id, "<-", url);
-    return id;
-  });
-  installing.set(url, job);
-  try {
-    return await job;
-  } finally {
-    installing.delete(url);
-  }
-}
-
-async function handleAddPlugin(req, res) {
-  let body;
-  try {
-    body = JSON.parse(await readBody(req, 16384));
-  } catch (e) {
-    return sendJson(res, 400, { error: "bad json body" });
-  }
-  const url = body && typeof body.url === "string" ? body.url.trim() : "";
-  if (!url) return sendJson(res, 400, { error: "missing url" });
-  if (state.some((e) => e.url === url))
-    return sendJson(res, 409, { error: "plugin already added" });
-  let id;
-  try {
-    id = await installPluginFromUrl(
-      url,
-      typeof body.name === "string" ? body.name : "",
-    );
-  } catch (e) {
-    return sendJson(res, 400, { error: e.message });
-  }
-  const entry = state.find((e) => e.id === id);
-  sendJson(res, 201, { plugin: publicPlugin(entry, req) });
-}
-
-// POST /api/repos {url} — fetch a SkyStream repo.json and list its plugins
-// (does NOT install anything; the client picks what to add)
-async function handleListRepo(req, res) {
-  let body;
-  try {
-    body = JSON.parse(await readBody(req, 16384));
-  } catch (e) {
-    return sendJson(res, 400, { error: "bad json body" });
-  }
-  const url = body && typeof body.url === "string" ? body.url.trim() : "";
-  if (!url) return sendJson(res, 400, { error: "missing url" });
-  try {
-    const list = await fetchRepoPlugins(url);
-    // remember repo plugins so their predicted per-plugin addon URLs
-    // (/<slug>/manifest.json) auto-install on first access — the card shows
-    // that URL, not the raw .sky build link
-    for (const p of list.plugins) {
-      repoPlugins.set(slugify(p.name), { url: p.url, name: p.name });
-    }
-    saveRepoPlugins();
-    sendJson(res, 200, list);
-  } catch (e) {
-    sendJson(res, 400, { error: e.message });
-  }
-}
-
-function handleDeletePlugin(req, res, id) {
-  const idx = state.findIndex((e) => e.id === id);
-  if (idx < 0) return sendJson(res, 404, { error: "plugin not found" });
-  const plugin = plugins.get(id);
-  if (plugin && plugin.runtime) plugin.runtime.destroy();
-  plugins.delete(id);
-  lastSelfWrite = Date.now(); // management-API writes manage state directly — no hot reload
-  fs.rmSync(path.join(PLUGINS_DIR, id), { recursive: true, force: true });
-  state.splice(idx, 1);
-  saveState();
-  pruneBundles();
-  saveBundles();
-  rebuildPrefixMap(globalPool);
-  console.log("removed plugin:", id);
-  sendJson(res, 200, { ok: true });
-}
-
-// ---------- addon handlers ----------
-
-function manifest(pool, req, idOverride) {
-  // self-heal: stale empty catalogs kick a background warm (Render idle spin-down)
-  for (const p of pool.plugins.values()) {
-    if (!p.sections.size && Date.now() - p.sectionsTs > CACHE_TTL_MS) {
-      warmAll();
-      break;
-    }
-  }
-  return {
-    id: idOverride || config.id || "com.stremio.addon",
-    name: config.name || "Stremio Addon",
-    description: config.description || "",
-    logo: config.logo || "",
-    version: "0.1.0",
-    resources: ["catalog", "meta", "stream"],
-    types: ["movie", "series"],
-    catalogs: catalogList(pool),
-  };
-}
-
-async function searchPool(targets, type, search) {
-  const seen = new Set();
-  const items = [];
-  for (const p of targets) {
-    if (!p.runtime) continue;
-    // plugins may export search or getSearch (CloudStream naming)
-    const fn = p.api.includes("search")
-      ? "search"
-      : p.api.includes("getSearch")
-        ? "getSearch"
-        : null;
-    if (!fn) continue;
-    const r = await callPlugin(p.runtime, fn, [search]);
-    if (!r.success || !Array.isArray(r.data)) {
-      console.warn("plugin", p.name, "search failed:", r.message || "no data");
-      continue;
-    }
-    for (const item of r.data) {
-      if (!item || !item.url || mapType(item.type) !== type) continue;
-      if (seen.has(item.url)) continue;
-      seen.add(item.url);
-      items.push(item);
-    }
-  }
-  return items;
-}
-
-async function handleCatalog(req, res, type, catalogId, search, pool) {
-  let found = findCatalog(pool, catalogId);
-  let items = [];
-  const q = new URLSearchParams((req.url || "").split("?")[1] || "");
-  const skip = Math.max(0, Number(q.get("skip")) || 0);
-  const genre = (q.get("genre") || "").trim();
-  if (search) {
-    // Stremio's global search hits /catalog/<type>/top.json?search=... (and any
-    // other unknown id) — route it to the pool's plugins' search and merge
-    items = await searchPool(
-      found ? [found.plugin] : [...pool.plugins.values()],
-      type,
-      search,
-    );
-  } else {
-    if (!found)
-      return sendJson(res, 404, { error: "unknown catalog: " + catalogId });
-    if (Date.now() - found.plugin.sectionsTs > CACHE_TTL_MS)
-      await warmPlugin(found.plugin, pool);
-    // descriptor-declared catalog not warmed yet: warm again (sections are
-    // populated by the warm above) and fall back to an empty list
-    if (!found.section) found = findCatalog(pool, catalogId);
-    items = found.section ? found.section.items : [];
-    if (genre) {
-      const g = genre.toLowerCase();
-      items = items.filter((it) =>
-        (it.tags || []).some((t) => String(t).toLowerCase().includes(g)),
-      );
-    }
-    if (skip > 0) items = items.slice(skip, skip + 20);
-  }
-  for (const it of items) catalogIndex.set(it.url || it.id, it);
-  if (catalogIndex.size > 20000) catalogIndex.clear();
-  sendJson(res, 200, {
-    metas: items
-      .map((it) => mapItem(it, found && found.slug))
-      .filter((m) => m.id),
-  });
-}
-
-// clients (Nuvio, Stremio) percent-encode the id exactly once — decode once.
-// Re-decoding while %XX remains corrupts ids whose own content contains
-// %-escapes (JSON-blob ids with URLs in descriptions).
-function decodeId(raw) {
-  try {
-    return decodeURIComponent(raw);
-  } catch (e) {
-    return raw;
-  }
-}
-
-// Meta is served entirely from the plugin's own load() data — the plugins are
-// standalone (own catalogs, own meta, own streams), like Dramayo/Muvibox/IPTV
-// addons. No Cinemeta coupling: no mirroring, no gap-filling.
-// Nuvio caps meta requests at 5s (FETCH_TIMEOUT_MS in its MetaDetailsRepository)
-// — a slow plugin load must not blank the detail page. Fall back to the
-// catalog item (in-memory, instant) with one playable video; the background
-// load keeps running and caches, so the follow-up stream request is complete.
-const META_FAST_MS = 3000;
-
-// id → catalog item, fed by catalog traffic. On cold start (sections not
-// warmed yet) the meta fallback still has the name/poster of whatever the
-// client just browsed — no state files needed.
-const catalogIndex = new Map();
 
 function catalogItemFor(plugin, id) {
   for (const section of plugin.sections.values())
@@ -1437,7 +900,7 @@ function catalogItemFor(plugin, id) {
           url: item.url || item.id || id,
           episodes: [{ name: "Play", url: id }],
         };
-  const item = catalogIndex.get(id);
+  const item = plugin.catalogIndex.get(id);
   if (item)
     return {
       ...item,
@@ -1446,11 +909,120 @@ function catalogItemFor(plugin, id) {
     };
   return null;
 }
+// ---------- endpoint handlers ----------
 
-async function handleMeta(req, res, type, id, pool) {
-  let plugin = pluginForId(id, pool);
-  if (!plugin) plugin = await probePluginForId(id, pool);
-  if (!plugin) return sendJson(res, 404, { error: "no plugin for id: " + id });
+function catalogList(plugin) {
+  const label = plugin.descriptor.name || plugin.name;
+  const prefix = plugin.descriptor.catalogPrefix || label;
+  const extras = [
+    { name: "skip", options: ["0", "1", "2", "3"] },
+    { name: "genre", options: [] },
+  ];
+  const out = [];
+  if (plugin.sections.size === 0) {
+    // not warmed yet: advertise the descriptor's declared catalogs so the
+    // addon is visible immediately (a slow getHome must not hide it)
+    for (const c of plugin.descriptor.catalogs || []) {
+      out.push({
+        id: c.id || prefix + "_" + (c.name || slugify(c.id || "")),
+        type: c.type || "movie",
+        name: c.name || c.id,
+        extra: extras,
+      });
+    }
+    return out;
+  }
+  for (const [slug, section] of plugin.sections) {
+    out.push({
+      id: prefix + "_" + slug,
+      type: section.type,
+      name: section.name,
+      extra: extras,
+    });
+  }
+  return out;
+}
+
+function buildManifest(plugin) {
+  return {
+    id: plugin.id,
+    name: plugin.descriptor.name || plugin.name,
+    description: plugin.descriptor.description || "",
+    logo: plugin.descriptor.iconUrl || "",
+    version: "0.1.0",
+    resources: ["catalog", "meta", "stream"],
+    types: ["movie", "series"],
+    catalogs: catalogList(plugin),
+  };
+}
+
+function findSection(plugin, catalogId) {
+  const prefix =
+    plugin.descriptor.catalogPrefix || plugin.descriptor.name || plugin.name;
+  if (catalogId.startsWith(prefix + "_")) {
+    const slug = catalogId.slice(prefix.length + 1);
+    const section = plugin.sections.get(slug);
+    if (section) return { section, slug };
+  }
+  for (const [slug, section] of plugin.sections)
+    if (slug === catalogId) return { section, slug };
+  return null;
+}
+
+async function handleCatalog(req, res, plugin, type, catalogId, base) {
+  const q = new URLSearchParams((req.url || "").split("?")[1] || "");
+  const search = (q.get("search") || "").trim();
+  const skip = Math.max(0, Number(q.get("skip")) || 0);
+  const genre = (q.get("genre") || "").trim();
+  let items = [];
+  let found = null;
+  if (search) {
+    // global search hits /catalog/<type>/<id>.json?search=... — route to the
+    // plugin's search and merge
+    const fn =
+      typeof plugin.ctx.search === "function"
+        ? "search"
+        : typeof plugin.ctx.getSearch === "function"
+          ? "getSearch"
+          : null;
+    if (fn) {
+      const r = await callPlugin(plugin, fn, [search]);
+      if (r.success && Array.isArray(r.data)) {
+        const seen = new Set();
+        for (const item of r.data) {
+          if (!item || !item.url || mapType(item.type) !== type) continue;
+          if (seen.has(item.url)) continue;
+          seen.add(item.url);
+          items.push(item);
+        }
+      }
+    }
+  } else {
+    found = findSection(plugin, catalogId);
+    if (!found)
+      return sendJson(res, 404, { error: "unknown catalog: " + catalogId });
+    if (Date.now() - plugin.sectionsTs > CACHE_TTL_MS) await warmPlugin(plugin);
+    found = findSection(plugin, catalogId); // re-lookup after warm
+    if (!found) return sendJson(res, 200, { metas: [] });
+    items = found.section.items;
+    if (genre) {
+      const g = genre.toLowerCase();
+      items = items.filter((it) =>
+        (it.tags || []).some((t) => String(t).toLowerCase().includes(g)),
+      );
+    }
+    if (skip > 0) items = items.slice(skip, skip + 20);
+  }
+  for (const it of items) plugin.catalogIndex.set(it.url || it.id, it);
+  if (plugin.catalogIndex.size > 20000) plugin.catalogIndex.clear();
+  sendJson(res, 200, {
+    metas: items
+      .map((it) => mapItem(it, found && found.slug))
+      .filter((m) => m.id),
+  });
+}
+
+async function handleMeta(req, res, plugin, type, id) {
   let item = await getRawItem(plugin, id, META_FAST_MS);
   if (!item) {
     // Nuvio caps meta at 5s — never wait for the slow upstream load. Serve
@@ -1473,77 +1045,45 @@ async function handleMeta(req, res, type, id, pool) {
 }
 
 async function loadStreamsFor(plugin, id) {
-  const r = await callPlugin(plugin.runtime, "loadStreams", [id]);
+  const r = await callPlugin(plugin, "loadStreams", [id]);
   return r.success && Array.isArray(r.data) ? r.data : [];
 }
 
-async function resolveStreams(plugin, metaId, season, episode) {
-  if (!plugin.runtime) return [];
-  const item = await getRawItem(plugin, metaId);
-  if (season !== null) {
-    if (!item || !Array.isArray(item.episodes)) return [];
-    const idx = item.episodes.findIndex((e, i) => {
-      const n = epNumbers(e, i);
-      return n.season === season && n.episode === episode;
-    });
-    if (idx < 0) return [];
-    return loadStreamsFor(plugin, item.episodes[idx].url || metaId);
-  }
-  if (item && Array.isArray(item.streams) && item.streams.length)
-    return item.streams;
-  if (item && Array.isArray(item.episodes) && item.episodes.length) {
-    const r = await loadStreamsFor(plugin, item.episodes[0].url || metaId);
-    if (r.length) return r;
-  }
-  return loadStreamsFor(plugin, metaId);
-}
-async function handleStream(req, res, type, id, pool, base) {
-  // SkyStream convention: series video ids are <metaId>:<season>:<episode>.
-  // Try the split interpretation FIRST (anikage http ids, netmirror JSON-blob
-  // ids), then the full id as a movie — probing with the unsplit id first lets
-  // a plugin "successfully" load garbage for the suffix and win the probe.
+async function handleStream(req, res, plugin, type, id, base) {
+  let raw = [];
+  // SkyStream convention: series video ids are <metaId>:<season>:<episode>
   const m = /^(.*):(\d+):(\d+)$/.exec(id);
   if (m) {
     const metaId = m[1];
     const season = +m[2];
     const episode = +m[3];
-    let p = pluginForId(metaId, pool);
-    if (!p) p = await probePluginForId(metaId, pool);
-    if (p) {
-      const raw = await resolveStreams(p, metaId, season, episode);
-      if (raw.length) return sendStreams(res, raw, base, p.name);
+    const item = await getRawItem(plugin, metaId);
+    if (item && Array.isArray(item.episodes)) {
+      const idx = item.episodes.findIndex((e, i) => {
+        const n = epNumbers(e, i);
+        return n.season === season && n.episode === episode;
+      });
+      if (idx >= 0)
+        raw = await loadStreamsFor(plugin, item.episodes[idx].url || metaId);
     }
   }
-  // full-id interpretation: a movie, or an id that genuinely ends in
-  // :digits:digits (rare) — the split above failed to produce streams
-  let plugin = pluginForId(id, pool);
-  if (!plugin) plugin = await probePluginForId(id, pool);
-  if (plugin) {
-    const raw = await resolveStreams(plugin, id, null, null);
-    if (raw.length) return sendStreams(res, raw, base, plugin.name);
+  if (!raw.length) {
+    const item = await getRawItem(plugin, id);
+    if (item && Array.isArray(item.streams) && item.streams.length)
+      raw = item.streams;
+    else if (item && Array.isArray(item.episodes) && item.episodes.length)
+      raw = await loadStreamsFor(plugin, item.episodes[0].url || id);
+    else raw = await loadStreamsFor(plugin, id);
   }
-  // empty is common when an upstream Cloudflare-challenges our datacenter IP
-  // and the plugin swallows the failure — log it so it's visible in server logs
-  console.warn(
-    "no streams for",
-    type,
-    id.slice(0, 120),
-    plugin ? "via " + plugin.name + " (empty result)" : "(no plugin matched)",
-  );
-  return sendJson(res, 404, { error: "no streams found" });
-}
-
-function sendStreams(res, raw, base, pluginName) {
   sendJson(res, 200, {
     streams: raw
       .filter((s) => s && s.url)
-      .map((s) => mapStream(s, base, pluginName)),
+      .map((s) => mapStream(s, base, plugin.name)),
   });
 }
 
-// ---------- magic-URL proxy ----------
+// ---------- proxy (m3u8 rewrite + byte streaming with Range) ----------
 
-// fetch with per-hop SSRF check and no silent cross-host redirects
 async function fetchSafe(url, headers, maxHops, signal) {
   let cur = url;
   for (let i = 0; i < maxHops; i++) {
@@ -1568,59 +1108,7 @@ async function fetchSafe(url, headers, maxHops, signal) {
   throw new Error("too many redirects");
 }
 
-async function proxyFetch(url, extraHeaders, req, res) {
-  const headers = { ...extraHeaders };
-  if (!headers["User-Agent"] && !headers["user-agent"])
-    headers["User-Agent"] = DEFAULT_UA;
-  if (!headers["Accept-Encoding"] && !headers["accept-encoding"])
-    headers["Accept-Encoding"] = "identity";
-  if (req.headers.range) headers["Range"] = req.headers.range;
-  const isHead = req.method === "HEAD";
-  const ctrl = new AbortController(); // bound streaming proxies; requestTimeout is the backstop
-  const timer = setTimeout(() => ctrl.abort(), 30000);
-  try {
-    const upstream = await fetchSafe(
-      url,
-      {
-        ...headers,
-        method: isHead ? "HEAD" : "GET",
-      },
-      5,
-      ctrl.signal,
-    );
-    const outHeaders = {
-      "Content-Type":
-        upstream.headers.get("content-type") || "application/octet-stream",
-      "Cache-Control": "no-store",
-      "Access-Control-Allow-Origin": "*",
-      "X-Content-Type-Options": "nosniff",
-      "Content-Security-Policy": "sandbox; default-src 'none'", // proxied bytes: never treat as page
-    };
-    // forward Content-Length only when the body wasn't decompressed
-    const enc = upstream.headers.get("content-encoding");
-    if (upstream.headers.get("content-length") && !enc)
-      outHeaders["Content-Length"] = upstream.headers.get("content-length");
-    if (upstream.headers.get("content-range"))
-      outHeaders["Content-Range"] = upstream.headers.get("content-range");
-    if (upstream.headers.get("accept-ranges"))
-      outHeaders["Accept-Ranges"] = upstream.headers.get("accept-ranges");
-    res.writeHead(upstream.status, outHeaders);
-    if (isHead || !upstream.body) return res.end();
-    const stream = Readable.fromWeb(upstream.body);
-    stream.on("error", () => res.end()); // upstream dropped mid-body → don't crash the process
-    res.on("close", () => stream.destroy());
-    res.on("error", () => stream.destroy());
-    stream.pipe(res);
-  } catch (e) {
-    if (!res.headersSent)
-      sendJson(res, 502, { error: "proxy fetch failed: " + e.message });
-    else res.end();
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function handleProxy(req, res, payloadPath) {
+async function handleProxy(req, res, plugin, payloadPath) {
   let payload;
   try {
     payload = decodeURIComponent(payloadPath);
@@ -1661,25 +1149,21 @@ async function handleProxy(req, res, payloadPath) {
       "Content-Type": "application/vnd.apple.mpegurl",
       "Cache-Control": "no-store",
       "Access-Control-Allow-Origin": "*",
+      "X-Content-Type-Options": "nosniff",
     });
     return res.end(rewritten);
   }
 
-  let url,
-    extraHeaders = {};
-  if (decoded.startsWith("{")) {
-    try {
-      const spec = JSON.parse(decoded);
-      url = spec.url;
-      if (spec.headers)
-        for (const [k, v] of Object.entries(spec.headers))
-          if (v != null) extraHeaders[k] = String(v);
-      if (spec.options && spec.options.referer)
-        extraHeaders["Referer"] = spec.options.referer;
-    } catch (e) {
-      return sendJson(res, 400, { error: "bad proxy payload" });
+  let url = "";
+  let extraHeaders = {};
+  try {
+    const obj = JSON.parse(decoded);
+    if (obj && typeof obj.url === "string") {
+      url = obj.url;
+      extraHeaders =
+        obj.headers && typeof obj.headers === "object" ? obj.headers : {};
     }
-  } else {
+  } catch (e) {
     url = decoded;
   }
   if (!url || typeof url !== "string" || !/^https?:\/\//.test(url))
@@ -1687,336 +1171,182 @@ async function handleProxy(req, res, payloadPath) {
   if (!extraHeaders["Referer"]) {
     try {
       extraHeaders["Referer"] = new URL(url).origin + "/";
-    } catch (e) {
-      // invalid url; fetchSafe reports it
-    }
+    } catch (e) {}
   }
-  await proxyFetch(url, extraHeaders, req, res);
-}
-
-// ---------- static dashboard ----------
-
-const STATIC_FILES = {
-  "/": { file: "index.html", type: "text/html; charset=utf-8" },
-  "/app.js": { file: "app.js", type: "text/javascript; charset=utf-8" },
-  "/styles.css": { file: "styles.css", type: "text/css; charset=utf-8" },
-};
-
-function serveStatic(req, res, url) {
-  const entry = STATIC_FILES[url];
-  if (!entry) return false;
-  const file = path.join(ROOT, "public", entry.file);
-  if (!fs.existsSync(file)) {
-    sendJson(res, 500, { error: "dashboard files missing" });
-    return true;
+  const headers = { ...extraHeaders };
+  if (!headers["User-Agent"] && !headers["user-agent"])
+    headers["User-Agent"] =
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36";
+  if (!headers["Accept-Encoding"] && !headers["accept-encoding"])
+    headers["Accept-Encoding"] = "identity";
+  if (req.headers.range) headers["Range"] = req.headers.range;
+  const isHead = req.method === "HEAD";
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 30000);
+  try {
+    const upstream = await fetchSafe(
+      url,
+      { ...headers, method: isHead ? "HEAD" : "GET" },
+      5,
+      ctrl.signal,
+    );
+    const outHeaders = {
+      "Content-Type":
+        upstream.headers.get("content-type") || "application/octet-stream",
+      "Cache-Control": "no-store",
+      "Access-Control-Allow-Origin": "*",
+      "X-Content-Type-Options": "nosniff",
+      "Content-Security-Policy": "sandbox; default-src 'none'",
+    };
+    const enc = upstream.headers.get("content-encoding");
+    if (upstream.headers.get("content-length") && !enc)
+      outHeaders["Content-Length"] = upstream.headers.get("content-length");
+    if (upstream.headers.get("content-range"))
+      outHeaders["Content-Range"] = upstream.headers.get("content-range");
+    if (upstream.headers.get("accept-ranges"))
+      outHeaders["Accept-Ranges"] = upstream.headers.get("accept-ranges");
+    res.writeHead(upstream.status, outHeaders);
+    if (isHead || !upstream.body) return res.end();
+    const stream = Readable.fromWeb(upstream.body);
+    stream.on("error", () => res.end());
+    res.on("close", () => stream.destroy());
+    res.on("error", () => stream.destroy());
+    stream.pipe(res);
+  } catch (e) {
+    if (!res.headersSent)
+      sendJson(res, 502, { error: "proxy fetch failed: " + e.message });
+    else res.end();
+  } finally {
+    clearTimeout(timer);
   }
-  res.writeHead(200, {
-    "Content-Type": entry.type,
-    "Cache-Control": "no-cache",
-    "X-Content-Type-Options": "nosniff",
-    "Content-Security-Policy":
-      "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self'",
-  });
-  res.end(fs.readFileSync(file));
-  return true;
 }
 
 // ---------- router ----------
 
-const server = http.createServer(async (req, res) => {
-  const url = req.url.split("?")[0];
-  const query = new URLSearchParams(req.url.split("?")[1] || "");
-  try {
-    if (req.method === "OPTIONS") {
-      res.writeHead(204, {
-        "Access-Control-Allow-Methods": "GET,POST,DELETE,OPTIONS",
-        "Access-Control-Allow-Headers": "*",
-      });
-      return res.end();
-    }
-
-    // ---- management API (public: this is a public plugin host) ----
-    if (url === "/api/plugins" && req.method === "GET")
-      return handleListPlugins(req, res);
-    if (url === "/api/plugins" && req.method === "POST")
-      return handleAddPlugin(req, res);
-    if (url === "/api/repos" && req.method === "POST")
-      return handleListRepo(req, res);
-    const delM = /^\/api\/plugins\/([A-Za-z0-9_-]+)$/.exec(url);
-    if (delM && req.method === "DELETE")
-      return handleDeletePlugin(req, res, delM[1]);
-    if (url === "/api/bundles" && req.method === "GET")
-      return handleListBundles(req, res);
-    if (url === "/api/bundles" && req.method === "POST")
-      return handleAddBundle(req, res);
-    const delBM = /^\/api\/bundles\/([a-f0-9]{16})$/.exec(url);
-    if (delBM && req.method === "DELETE")
-      return handleDeleteBundle(req, res, delBM[1]);
-
-    // ---- dashboard ----
-    if (url === "/" || url === "/index.html") {
-      return serveStatic(req, res, "/");
-    }
-    if (serveStatic(req, res, url)) return;
-
-    // ---- bundles: unique addon URLs for a user's plugin selection ----
-    const bundleM = /^\/bundle\/([a-f0-9]{16})\/(.+)$/.exec(url);
-    if (bundleM) {
-      const b = bundles.find((x) => x.id === bundleM[1]);
-      if (!b) return sendJson(res, 404, { error: "bundle not found" });
-      return serveBundleDispatch(
-        req,
-        res,
-        bundlePool(b),
-        config.id + "-bundle-" + b.id,
-        "/" + bundleM[2],
-        query,
-      );
-    }
-    // stateless bundle: the URL carries the plugin manifest URLs, so it
-    // survives state wipes (Render ephemeral disk). Plugins are (re)installed
-    // on demand from their original manifests — first hit after a wipe is
-    // slow, later hits use the in-memory plugins map.
-    const autoM = /^\/bundle\/auto\/([A-Za-z0-9_-]+)\/(.+)$/.exec(url);
-    if (autoM) {
-      let urls;
-      try {
-        urls = JSON.parse(Buffer.from(autoM[1], "base64url").toString());
-      } catch (e) {
-        urls = null;
-      }
-      if (!Array.isArray(urls) || !urls.length)
-        return sendJson(res, 400, { error: "bad bundle payload" });
-      const ids = [];
-      for (const u of urls) {
-        if (typeof u !== "string") continue;
-        try {
-          ids.push(await installPluginFromUrl(u));
-        } catch (e) {
-          console.warn("bundle skip", u, "-", e.message);
-        }
-      }
-      if (!ids.length)
-        return sendJson(res, 404, {
-          error: "no installable plugins in bundle",
-        });
-      return serveBundleDispatch(
-        req,
-        res,
-        bundlePool({ id: autoBundleId(urls), pluginIds: ids }),
-        config.id + "-bundle-" + autoBundleId(urls),
-        "/" + autoM[2],
-        query,
-      );
-    }
-
-    // ---- per-plugin addon URLs: /<id-or-slug-selection>/<route> ----
-    // A selection (<slug1>-<slug2>-…) is served from one combined pool. The
-    // URL is deterministic: same selection -> same link, restart-proof (the
-    // registry is re-seeded from plugins.txt at every boot).
-    const pluginM = /^\/([A-Za-z0-9_-]{1,64})\/(.+)$/.exec(url);
-    if (pluginM) {
-      const seg = pluginM[1];
-      const rest = "/" + pluginM[2];
-      if (!plugins.has(seg)) {
-        // repo-listed plugin not installed yet: auto-install on first access
-        // so the predicted addon URL (/<slug>/manifest.json) works as-is
-        const rp = repoPlugins.get(seg);
-        if (rp) {
-          try {
-            await installPluginFromUrl(rp.url);
-          } catch (e) {
-            console.warn("auto-install skip", rp.url, "-", e.message);
-          }
-        }
-      }
-      if (plugins.has(seg)) {
-        const plugin = plugins.get(seg);
-        const pool = poolFor(plugin);
-        const base = publicBase(req) + "/" + seg;
-        if (rest === "/manifest.json")
-          return sendJson(res, 200, manifest(pool, req));
-        const proxyM = /^\/proxy\/(.+)$/.exec(rest);
-        if (proxyM) return handleProxy(req, res, proxyM[1]);
-        const catM =
-          /^\/catalog\/(movie|series)\/([^/]+)(?:\/[^/]+)?\.json$/.exec(rest);
-        if (catM)
-          return handleCatalog(
-            req,
-            res,
-            catM[1],
-            decodeId(catM[2]),
-            query.get("search"),
-            pool,
-          );
-        const metaM = /^\/meta\/(movie|series)\/(.+)\.json$/.exec(rest);
-        if (metaM)
-          return handleMeta(req, res, metaM[1], decodeId(metaM[2]), pool);
-        const streamM = /^\/stream\/(movie|series)\/(.+)\.json$/.exec(rest);
-        if (streamM)
-          return handleStream(
-            req,
-            res,
-            streamM[1],
-            decodeId(streamM[2]),
-            pool,
-            base,
-          );
-        return sendJson(res, 404, { error: "not found" });
-      }
-      // multi-provider .sky installs as <slug>-<provider>: point the request
-      // at the first provider addon
-      const alt = [...plugins.keys()].find((k) => k.startsWith(seg + "-"));
-      if (alt)
-        return res
-          .writeHead(302, { Location: "/" + alt + "/" + pluginM[2] })
-          .end();
-      // combined selection: every dash-separated part is an installed id or a
-      // repo slug — missing ones are auto-installed, then served from one pool
-      if (seg.includes("-")) {
-        const ids = [];
-        for (const part of seg.split("-")) {
-          if (plugins.has(part)) {
-            ids.push(part);
-            continue;
-          }
-          const rp = repoPlugins.get(part);
-          if (!rp) break;
-          try {
-            await installPluginFromUrl(rp.url);
-          } catch (e) {
-            console.warn("auto-install skip", rp.url, "-", e.message);
-          }
-          const found = [...plugins.keys()].filter(
-            (k) => k === part || k.startsWith(part + "-"),
-          );
-          if (!found.length) break;
-          ids.push(...found);
-        }
-        if (ids.length > 1) {
-          const pool = bundlePool({ pluginIds: [...new Set(ids)] });
-          return serveBundleDispatch(req, res, pool, seg, rest, query);
-        }
-      }
-    }
-
-    // ---- default addon (all plugins) ----
-    if (url === "/manifest.json")
-      return sendJson(res, 200, manifest(globalPool, req));
-    const proxyM = /^\/proxy\/(.+)$/.exec(url);
-    if (proxyM) return handleProxy(req, res, proxyM[1]);
-    const catM = /^\/catalog\/(movie|series)\/([^/]+)(?:\/[^/]+)?\.json$/.exec(
-      url,
-    );
-    if (catM)
-      return handleCatalog(
-        req,
-        res,
-        catM[1],
-        decodeId(catM[2]),
-        query.get("search"),
-        globalPool,
-      );
-    const metaM = /^\/meta\/(movie|series)\/(.+)\.json$/.exec(url);
-    if (metaM)
-      return handleMeta(req, res, metaM[1], decodeId(metaM[2]), globalPool);
-    const streamM = /^\/stream\/(movie|series)\/(.+)\.json$/.exec(url);
-    if (streamM)
-      return handleStream(
-        req,
-        res,
-        streamM[1],
-        decodeId(streamM[2]),
-        globalPool,
-        publicBase(req),
-      );
-    sendJson(res, 404, { error: "not found" });
-  } catch (e) {
-    console.error("request error:", e);
-    sendJson(res, 500, { error: e.message || "internal error" });
-  }
-});
-
-// hot reload (dev/test only): reload + re-warm on plugin/ changes. Writes by
-// the management API set lastSelfWrite and are skipped. Off in production —
-// there the API is the only writer, and a reload re-warms every plugin, so a
-// flaky upstream would wipe the catalogs the add flow just built.
-let booting = true;
-let lastSelfWrite = 0;
-// paths the server itself wrote (installs, state loads) — inotify batches
-// events, so they can arrive seconds after the write when the timestamp
-// guard alone would let a self-write trigger a reload
-const selfWritten = new Set();
-setInterval(() => selfWritten.clear(), 30000).unref();
-let reloadTimer = null;
-let reloadChain = Promise.resolve();
-const reloadNow = () => {
-  if (booting || Date.now() - lastSelfWrite < 1000) return;
-  clearTimeout(reloadTimer);
-  reloadTimer = setTimeout(() => {
-    reloadChain = reloadChain
-      .then(async () => {
-        console.log("plugins changed — reloading");
-        await loadFromState();
-        await warmAll();
-      })
-      .catch((e) => console.warn("reload failed:", e.message));
-  }, 500);
+const STATIC_FILES = {
+  "/": { file: "index.html", type: "text/html; charset=utf-8" },
+  "/index.html": { file: "index.html", type: "text/html; charset=utf-8" },
+  "/app.js": { file: "app.js", type: "text/javascript; charset=utf-8" },
+  "/style.css": { file: "style.css", type: "text/css; charset=utf-8" },
 };
-if (process.env.NODE_ENV !== "production") {
-  const watcher = fs.watch(PLUGINS_DIR, { recursive: true }, (ev, fname) => {
-    if (fname && selfWritten.has(path.join(PLUGINS_DIR, fname))) return;
-    reloadNow();
-  });
-  // a plugin dir removed mid-watch makes the recursive watcher throw ENOENT
-  // and crash the whole server — ignore it, reloadNow() handles the change
-  watcher.on("error", (e) => {
-    if (e && e.code === "ENOENT") return;
-    console.warn("plugin dir watcher error:", e && e.message);
+
+function serveStatic(res, entry) {
+  const file = path.join(__dirname, "public", entry.file);
+  fs.readFile(file, (err, data) => {
+    if (err) return sendJson(res, 404, { error: "not found" });
+    res.writeHead(200, {
+      "Content-Type": entry.type,
+      "Content-Length": data.length,
+      "Access-Control-Allow-Origin": "*",
+    });
+    res.end(data);
   });
 }
 
-async function boot() {
-  await loadState();
-  await loadFromState();
-  loadBundles();
-  loadRepoPlugins();
-  // awaited: the first request may hit a repo slug right after boot, and the
-  // seed must have populated the registry by then (parallel, ~2-5s total)
-  await seedReposFromFile();
-  booting = false;
+async function handleRequest(req, res) {
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+      "Access-Control-Allow-Headers": "*",
+    });
+    return res.end();
+  }
+  const urlPath = (req.url || "/").split("?")[0];
+  const base = publicBase(req);
+
+  if (STATIC_FILES[urlPath]) return serveStatic(res, STATIC_FILES[urlPath]);
+  if (urlPath === "/api/plugins")
+    return sendJson(res, 200, {
+      plugins: CONFIG.map((e) => ({
+        id: e.id,
+        name: e.name || e.id,
+        addonUrl: base + "/" + e.id + "/manifest.json",
+      })),
+    });
+
+  // /plugin/<b64url>/... — plugin identified by its .sky URL in the path
+  const b64M = /^\/plugin\/([A-Za-z0-9_-]+)(\/.*)$/.exec(urlPath);
+  // /<slug>/... — plugin from the config
+  const slugM = /^\/([^/]+)(\/.*)$/.exec(urlPath);
+  const key = b64M ? b64M[1] : slugM ? slugM[1] : null;
+  const rest = b64M ? b64M[2] : slugM ? slugM[2] : "";
+  if (!key || !rest) return sendJson(res, 404, { error: "not found" });
+
+  const plugin = pluginForKey(key);
+  if (!plugin) return sendJson(res, 404, { error: "unknown plugin: " + key });
+  const runtimeError = await ensureRuntime(plugin);
+  if (runtimeError)
+    return sendJson(res, 502, {
+      error: "plugin failed to load: " + runtimeError,
+    });
+
+  if (rest === "/manifest.json") {
+    // first manifest fetch warms the catalogs (slow getHome must not block
+    // the addon being visible — descriptor catalogs are advertised meanwhile)
+    const warmed = warmPlugin(plugin).catch(() => {});
+    if (plugin.sections.size === 0 && plugin.descriptor.catalogs?.length)
+      return sendJson(res, 200, buildManifest(plugin));
+    await warmed;
+    return sendJson(res, 200, buildManifest(plugin));
+  }
+
+  const metaM = /^\/meta\/(movie|series)\/(.+)\.json$/.exec(rest);
+  if (metaM) return handleMeta(req, res, plugin, metaM[1], decodeId(metaM[2]));
+
+  const streamM = /^\/stream\/(movie|series)\/(.+)\.json$/.exec(rest);
+  if (streamM)
+    return handleStream(
+      req,
+      res,
+      plugin,
+      streamM[1],
+      decodeId(streamM[2]),
+      base,
+    );
+
+  const catalogM = /^\/catalog\/(movie|series)\/(.+)\.json$/.exec(rest);
+  if (catalogM)
+    return handleCatalog(
+      req,
+      res,
+      plugin,
+      catalogM[1],
+      decodeId(catalogM[2]),
+      base,
+    );
+
+  const proxyM = /^\/proxy\/(.+)$/.exec(rest);
+  if (proxyM) return handleProxy(req, res, plugin, proxyM[1]);
+
+  return sendJson(res, 404, { error: "not found" });
+}
+
+// ---------- boot ----------
+
+function handler(req, res) {
+  handleRequest(req, res).catch((e) => {
+    if (!res.headersSent)
+      sendJson(res, 500, {
+        error: "internal error: " + String((e && e.message) || e),
+      });
+    else res.end();
+  });
+}
+
+if (require.main === module) {
+  const server = http.createServer(handler);
+  server.on("error", (e) => {
+    console.error("server error:", e);
+    if (e.code === "EADDRINUSE") process.exit(1);
+  });
   server.listen(PORT, () => {
-    console.log("addon listening on http://localhost:" + PORT);
-    console.log("dashboard: http://localhost:" + PORT + "/");
+    console.log("plugin bridge listening on :" + PORT);
+    console.log(
+      "configured plugins:",
+      CONFIG.map((e) => e.id).join(", ") || "(none)",
+    );
   });
-  // warm in the background — slow plugins (token-minting getHome can take
-  // ~60s) must not delay boot past Render's deploy timeout
-  warmAll();
 }
 
-setInterval(() => warmAll(), 30 * 60 * 1000).unref();
-
-function shutdown() {
-  console.log("shutting down");
-  server.close();
-  destroyPool(globalPool);
-  process.exit(0);
-}
-process.on("SIGTERM", shutdown);
-process.on("SIGINT", shutdown);
-// router does `return handler(req, res)` — a rejection there bypasses the
-// try/catch and would crash the whole server (unhandled rejection). Log it
-// and keep serving; the request already got its 500 via the handler's own
-// error paths where possible.
-process.on("unhandledRejection", (e) => {
-  console.error("unhandled rejection:", e && e.stack ? e.stack : e);
-});
-server.on("error", (e) => {
-  console.error("server error:", e);
-  if (e.code === "EADDRINUSE") process.exit(1);
-});
-
-boot().catch((e) => {
-  console.error("boot failed:", e);
-  process.exit(1);
-});
+module.exports = { handler };

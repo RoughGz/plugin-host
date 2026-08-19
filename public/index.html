@@ -3,194 +3,109 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Plugin Host — Stremio Addon Manager</title>
-    <link
-      rel="icon"
-      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%236d5df6'/%3E%3Cpath d='M9 22V10l7 7 7-7v12' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"
-    />
-    <link rel="stylesheet" href="/styles.css" />
+    <title>Plugin Bridge</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        max-width: 640px;
+        margin: 2rem auto;
+        padding: 0 1rem;
+        color: #222;
+      }
+      h1 {
+        font-size: 1.3rem;
+      }
+      input,
+      button {
+        font-size: 1rem;
+        padding: 0.5rem;
+        box-sizing: border-box;
+      }
+      input {
+        width: 100%;
+      }
+      button {
+        margin-top: 0.5rem;
+        cursor: pointer;
+      }
+      .url {
+        word-break: break-all;
+        background: #f4f4f4;
+        padding: 0.75rem;
+        border-radius: 6px;
+        margin-top: 1rem;
+      }
+      .url a {
+        color: #06c;
+      }
+      ul {
+        list-style: none;
+        padding: 0;
+      }
+      li {
+        margin: 0.5rem 0;
+      }
+      .hint {
+        color: #666;
+        font-size: 0.9rem;
+      }
+    </style>
   </head>
   <body>
-    <header class="topbar">
-      <div class="brand">
-        <svg class="brand-logo" viewBox="0 0 32 32" aria-hidden="true">
-          <rect width="32" height="32" rx="8" fill="url(#g)" />
-          <defs>
-            <linearGradient id="g" x1="0" y1="0" x2="32" y2="32">
-              <stop offset="0" stop-color="#6d5df6" />
-              <stop offset="1" stop-color="#a855f7" />
-            </linearGradient>
-          </defs>
-          <path
-            d="M9 22V10l7 7 7-7v12"
-            stroke="white"
-            stroke-width="3"
-            fill="none"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          />
-        </svg>
-        <div class="brand-text">
-          <h1>Plugin Host</h1>
-          <p>Stremio addon manager</p>
-        </div>
-      </div>
-    </header>
-
-    <main class="container">
-      <section class="plugins-section">
-        <div class="section-head">
-          <h2>Your plugins</h2>
-        </div>
-        <div class="stats" id="stats" hidden>
-          <div class="stat"><span id="statPlugins">0</span> plugins</div>
-          <div class="stat"><span id="statCatalogs">0</span> catalogs</div>
-          <div class="stat stat-live"><span id="statLive">0</span> live</div>
-        </div>
-        <div class="sel-bar" id="selBar">
-          <span id="selCount">0 plugins selected</span>
-          <div class="sel-actions">
-            <button id="selectAll" class="btn btn-ghost btn-sm">
-              Select all
-            </button>
-            <button id="removeAll" class="btn btn-ghost btn-sm">
-              Remove all from selection
-            </button>
-            <button id="makeBundle" class="btn btn-primary btn-xs" disabled>
-              <span class="btn-label">Generate URL for selection</span>
-              <span class="spinner" hidden></span>
-            </button>
-            <button id="resetBtn" class="btn btn-ghost btn-sm">Reset</button>
-          </div>
-        </div>
-        <div id="selPreview" class="sel-preview" hidden></div>
-        <div id="bundleResult" class="bundle-result" hidden>
-          <div class="bundle-result-head">
-            <strong>Your unique addon URL</strong>
-            <button
-              class="icon-btn"
-              id="bundleResultClose"
-              title="Dismiss"
-              aria-label="Dismiss"
-            >
-              <svg
-                viewBox="0 0 24 24"
-                width="15"
-                height="15"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-              >
-                <path d="M18 6L6 18M6 6l12 12" />
-              </svg>
-            </button>
-          </div>
-          <p>
-            This URL serves exactly the plugins you selected — adding or
-            removing plugins later won't change it. Share it with anyone.
-          </p>
-          <div class="url-row">
-            <code class="url" id="bundleResultUrl"></code>
-            <button
-              class="icon-btn"
-              id="bundleResultCopy"
-              title="Copy URL"
-              aria-label="Copy URL"
-            >
-              <svg
-                viewBox="0 0 24 24"
-                width="15"
-                height="15"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-              >
-                <rect x="9" y="9" width="13" height="13" rx="2" />
-                <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" />
-              </svg>
-            </button>
-          </div>
-          <div class="card-actions">
-            <a class="btn btn-primary btn-sm" id="bundleResultInstall" href="#">
-              Install in Stremio
-            </a>
-            <button class="btn btn-ghost btn-sm" id="bundleResultCopyBtn">
-              Copy URL
-            </button>
-          </div>
-        </div>
-        <div id="grid" class="grid">
-          <section class="add-card">
-            <div class="add-card-head">
-              <h2>Add a plugin or repository</h2>
-              <p class="hint">
-                1. Add a plugin URL or load a repo.json &bull; 2. Toggle plugins
-                &bull; 3. Generate URL for selection &bull; 4. Install in
-                Stremio
-              </p>
-            </div>
-            <form id="addForm" class="add-form">
-              <input
-                id="urlInput"
-                type="url"
-                spellcheck="false"
-                autocomplete="off"
-                placeholder="https://github.com/user/repo/tree/main/plugin-folder  or  .../repo.json"
-                required
-              />
-              <button type="submit" class="btn btn-primary" id="addBtn">
-                <span class="btn-label">Add</span>
-                <span class="spinner" hidden></span>
-              </button>
-            </form>
-            <div id="addError" class="alert alert-error" hidden></div>
-            <div id="repoInfo" class="repo-info" hidden></div>
-          </section>
-        </div>
-        <div id="empty" class="empty" hidden>
-          <svg
-            viewBox="0 0 24 24"
-            width="48"
-            height="48"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.5"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          >
-            <path d="M12 3v12m0 0l-4-4m4 4l4-4" />
-            <path d="M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" />
-          </svg>
-          <h3>No plugins yet</h3>
-          <p>
-            Add your first plugin above — each one gets its own unique addon URL
-            you can install in Stremio.
-          </p>
-        </div>
-      </section>
-
-      <section class="bundles-section" id="bundlesSection" hidden>
-        <div class="section-head">
-          <h2>Your bundles</h2>
-          <span class="badge" id="bundleCount" hidden></span>
-        </div>
-        <div id="bundleList" class="bundle-list"></div>
-      </section>
-    </main>
-
-    <footer class="footer">
-      <p>
-        Plugins are managed here — no config files. Each plugin runs sandboxed
-        in its own worker thread.
-      </p>
-    </footer>
-
-    <div id="toasts" class="toasts" aria-live="polite"></div>
-
-    <script src="/app.js"></script>
+    <h1>Plugin Bridge</h1>
+    <p class="hint">
+      Paste a plugin URL (a <code>.sky</code> bundle or
+      <code>plugin.js</code> link) and get an addon URL to paste into Stremio /
+      Nuvio. Nothing is installed on the server — the addon URL carries the
+      plugin link itself.
+    </p>
+    <input
+      id="url"
+      placeholder="https://raw.githubusercontent.com/.../plugin.sky"
+      spellcheck="false"
+    />
+    <button onclick="makeUrl()">Generate addon URL</button>
+    <div class="url" id="out" hidden></div>
+    <h2>Bookmarked plugins</h2>
+    <ul id="list"></ul>
+    <script>
+      function b64url(s) {
+        return btoa(unescape(encodeURIComponent(s)))
+          .replace(/\+/g, "-")
+          .replace(/\//g, "_")
+          .replace(/=+$/, "");
+      }
+      function makeUrl() {
+        const raw = document.getElementById("url").value.trim();
+        const out = document.getElementById("out");
+        if (!/^https?:\/\//.test(raw)) {
+          out.textContent = "enter a valid https URL";
+          out.hidden = false;
+          return;
+        }
+        const addon =
+          location.origin + "/plugin/" + b64url(raw) + "/manifest.json";
+        out.innerHTML = '<a href="' + addon + '">' + addon + "</a>";
+        out.hidden = false;
+      }
+      fetch("api/plugins")
+        .then((r) => r.json())
+        .then((d) => {
+          const ul = document.getElementById("list");
+          for (const p of d.plugins || []) {
+            const li = document.createElement("li");
+            li.innerHTML =
+              "<strong>" +
+              p.name +
+              "</strong> — <a href='" +
+              p.addonUrl +
+              "'>" +
+              p.addonUrl +
+              "</a>";
+            ul.appendChild(li);
+          }
+        })
+        .catch(() => {});
+    </script>
   </body>
 </html>

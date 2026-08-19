@@ -1443,13 +1443,14 @@ async function handleMeta(req, res, type, id, pool) {
   if (!plugin) plugin = await probePluginForId(id, pool);
   if (!plugin) return sendJson(res, 404, { error: "no plugin for id: " + id });
   let item = await getRawItem(plugin, id, META_FAST_MS);
+  if (!item) item = catalogItemFor(plugin, id);
   if (!item) {
     // cold start: sections are empty until warmAll() finishes, so the catalog
     // fallback can't help yet — wait for the in-flight load (well under
     // Nuvio's 60s OkHttp timeout) before giving up
     item = await getRawItem(plugin, id, 15000);
+    if (!item) item = catalogItemFor(plugin, id);
   }
-  if (!item) item = catalogItemFor(plugin, id);
   if (!item) return sendJson(res, 404, { error: "meta not found" });
   sendJson(res, 200, { meta: mapMeta(item) });
 }

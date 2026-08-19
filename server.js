@@ -1268,6 +1268,22 @@ async function handleRequest(req, res) {
 }
 
 function handler(req, res) {
+  if (req.url === "/health") {
+    const mem = process.memoryUsage();
+    return sendJson(res, 200, {
+      uptime: Math.round(process.uptime()),
+      rss: Math.round(mem.rss / 1048576),
+      heap: Math.round(mem.heapUsed / 1048576),
+      plugins: pluginsByKey.size,
+      sections: [...pluginsByKey.values()].map((p) => ({
+        name: p.name,
+        sections: p.sections.size,
+        meta: p.metaCache.size,
+        streams: p.streamCache.size,
+        status: p.status,
+      })),
+    });
+  }
   handleRequest(req, res).catch((e) => {
     if (!res.headersSent)
       sendJson(res, 500, {

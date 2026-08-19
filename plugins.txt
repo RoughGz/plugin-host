@@ -1,0 +1,2 @@
+# One plugin per line: slug URL. The /<slug>/ addon URL works across restarts.
+movieblast https://raw.githubusercontent.com/RougheHz/pluginsforsky/main/dist/com.cookie.moviblast.sky

@@ -25,12 +25,20 @@ const META_TIMED_OUT = Symbol("meta.timed.out");
 // ---------- config ----------
 
 function loadConfig() {
+  // plugins.txt: one "slug URL" per line (# comments and blank lines allowed)
   for (const p of [
-    path.join(__dirname, "plugins.json"),
-    path.join(process.cwd(), "plugins.json"),
+    path.join(__dirname, "plugins.txt"),
+    path.join(process.cwd(), "plugins.txt"),
   ]) {
     try {
-      return JSON.parse(fs.readFileSync(p, "utf8"));
+      const out = [];
+      for (const line of fs.readFileSync(p, "utf8").split("\n")) {
+        const t = line.trim();
+        if (!t || t.startsWith("#")) continue;
+        const [id, url] = t.split(/\s+/);
+        if (id && url) out.push({ id, url });
+      }
+      return out;
     } catch (e) {}
   }
   return [];

@@ -97,3 +97,4 @@ test.js            self-checks
 data/plugins.json  app-managed plugin state (gitignored)
 plugins/           one folder per plugin (plugin.js + plugin.json)
 ```
+deploy trigger

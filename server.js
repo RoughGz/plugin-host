@@ -14,7 +14,7 @@ const {
 } = require("./lib/plugin-url");
 
 const PORT = Number(process.env.PORT) || 3000;
-const CACHE_TTL_MS = 30 * 60 * 1000;
+const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const META_FAST_MS = 3000;
 const NEGATIVE_TTL_MS = 60 * 1000;
 const SOURCE_TTL_MS = 60 * 60 * 1000;

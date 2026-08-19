@@ -522,14 +522,10 @@
     <main>
       <section class="hero">
         <h1>One link. <span>Every plugin.</span></h1>
-        <p>
-          Paste any plugin link — a plugin.js file, a .sky file, a GitHub
-          folder, a whole repository, or a repo.json — and get ready-to-install
-          addon URLs for every plugin inside.
-        </p>
+        <p>Paste any plugin link. Get addon URLs.</p>
         <div class="chips" id="chips">
           <span class="chip"><b>0</b> plugins loaded</span>
-          <span class="chip"><b>0</b> selected</span>
+          <span class="chip"><b>0</b> enabled</span>
         </div>
       </section>
 
@@ -546,16 +542,16 @@
           <button class="btn" id="load">Load plugins</button>
         </div>
         <div class="hint" style="margin-top: 10px">
-          One box for everything: single plugin, GitHub folder, whole repo, or a
-          repo.json with many plugins.
+          Plugin file, GitHub folder, whole repo, or repo.json — one box for
+          everything.
         </div>
       </section>
 
       <section id="listSection" style="display: none">
         <div class="toolbar">
           <span class="count" id="listCount"></span>
-          <button class="btn ghost" id="selectAll">Select all</button>
-          <button class="btn ghost" id="clearSel">Remove selection</button>
+          <button class="btn ghost" id="enableAll">Enable all</button>
+          <button class="btn ghost" id="disableAll">Disable all</button>
           <button class="btn ghost danger" id="resetBtn">Reset</button>
           <button class="btn green small" id="generate">
             Generate addon URLs
@@ -602,6 +598,14 @@
               Hit Install in Stremio for each URL — or copy the URLs and add
               them manually. No accounts, no storage.
             </p>
+            <a
+              class="btn ghost small"
+              style="display: inline-block; margin-top: 12px; text-decoration: none"
+              href="https://github.com/akashdh11/skystream-tools/blob/main/DEVELOPER.md"
+              target="_blank"
+              rel="noopener"
+              >Develop your own plugin</a
+            >
           </div>
         </div>
       </section>
@@ -616,8 +620,7 @@
       const state = {
         url: "",
         plugins: [],
-        selected: new Set(),
-        disabled: new Set(),
+        enabled: new Set(),
       };
       const b64u = (s) =>
         btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
@@ -669,8 +672,8 @@
           state.plugins.length +
           "</b> plugins loaded</span>" +
           '<span class="chip"><b>' +
-          state.selected.size +
-          "</b> selected</span>";
+          state.enabled.size +
+          "</b> enabled</span>";
       }
 
       function render() {
@@ -682,8 +685,7 @@
         }
         list.innerHTML = state.plugins
           .map((p, i) => {
-            const off = state.disabled.has(i);
-            const checked = state.selected.has(i);
+            const on = state.enabled.has(i);
             const desc = p.description
               ? '<div class="desc">' +
                 p.description.replace(/</g, "&lt;") +
@@ -691,15 +693,7 @@
               : "";
             return (
               '<div class="row' +
-              (off ? " off" : "") +
-              '">' +
-              '<input type="checkbox" data-i="' +
-              i +
-              '"' +
-              (checked ? " checked" : "") +
-              (off ? " disabled" : "") +
-              ' aria-label="Select ' +
-              p.name +
+              (on ? "" : " off") +
               '">' +
               '<div class="meta">' +
               '<div class="name">' +
@@ -714,11 +708,11 @@
               desc +
               "</div>" +
               '<button class="toggle' +
-              (off ? "" : " on") +
+              (on ? " on" : "") +
               '" data-t="' +
               i +
               '" role="switch" aria-checked="' +
-              !off +
+              on +
               '" aria-label="Toggle ' +
               p.name +
               '"></button>' +
@@ -747,9 +741,9 @@
       function generate() {
         const chosen = state.plugins
           .map((p, i) => ({ p, i }))
-          .filter((x) => state.selected.has(x.i) && !state.disabled.has(x.i));
+          .filter((x) => state.enabled.has(x.i));
         if (!chosen.length) {
-          toast("Select at least one enabled plugin first", "err");
+          toast("Enable at least one plugin first", "err");
           return;
         }
         $("results").innerHTML = chosen
@@ -795,8 +789,7 @@
           if (!r.ok) throw new Error(data.error || "failed to list plugins");
           state.url = u;
           state.plugins = data.plugins || [];
-          state.selected = new Set();
-          state.disabled = new Set();
+          state.enabled = new Set();
           $("resultsSection").style.display = "none";
           render();
           if (state.plugins.length)
@@ -814,8 +807,7 @@
       function reset() {
         state.url = "";
         state.plugins = [];
-        state.selected = new Set();
-        state.disabled = new Set();
+        state.enabled = new Set();
         $("url").value = "";
         $("list").innerHTML = "";
         $("results").innerHTML = "";
@@ -829,14 +821,12 @@
       $("url").addEventListener("keydown", (e) => {
         if (e.key === "Enter") load();
       });
-      $("selectAll").addEventListener("click", () => {
-        state.plugins.forEach((_, i) => {
-          if (!state.disabled.has(i)) state.selected.add(i);
-        });
+      $("enableAll").addEventListener("click", () => {
+        state.plugins.forEach((_, i) => state.enabled.add(i));
         render();
       });
-      $("clearSel").addEventListener("click", () => {
-        state.selected.clear();
+      $("disableAll").addEventListener("click", () => {
+        state.enabled.clear();
         render();
       });
       $("resetBtn").addEventListener("click", reset);
@@ -844,28 +834,17 @@
       $("copyAll").addEventListener("click", () => {
         const urls = state.plugins
           .map((p, i) => ({ p, i }))
-          .filter((x) => state.selected.has(x.i) && !state.disabled.has(x.i))
+          .filter((x) => state.enabled.has(x.i))
           .map((x) => addonUrl(x.p.url));
         if (urls.length)
           copy(urls.join("\n"), "Copied " + urls.length + " URLs");
-        else toast("Select at least one enabled plugin first", "err");
+        else toast("Enable at least one plugin first", "err");
       });
       $("list").addEventListener("click", (e) => {
-        const i = e.target.dataset.i;
-        if (i !== undefined && e.target.type === "checkbox") {
-          const n = Number(i);
-          if (e.target.checked) state.selected.add(n);
-          else state.selected.delete(n);
-          updateChips();
-        } else if (e.target.dataset.t !== undefined) {
+        if (e.target.dataset.t !== undefined) {
           const n = Number(e.target.dataset.t);
-          if (state.disabled.has(n)) {
-            state.disabled.delete(n);
-            state.selected.add(n);
-          } else {
-            state.disabled.add(n);
-            state.selected.delete(n);
-          }
+          if (state.enabled.has(n)) state.enabled.delete(n);
+          else state.enabled.add(n);
           render();
         } else if (e.target.dataset.c !== undefined) {
           copy(

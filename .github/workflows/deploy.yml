@@ -16,7 +16,7 @@ jobs:
       - name: Deploy
         run: |
           git remote add beamup dokku@a.baby-beamup.club:${{ vars.BEAMUP_APP_ID }}/${{ vars.BEAMUP_PROJECT_NAME }}
-          git push beamup HEAD:main --force
+          git push beamup HEAD:master --force
       - name: Verify
         run: |
           sleep 30

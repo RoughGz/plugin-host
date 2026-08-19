@@ -1,1 +1,0 @@
-movieblast https://raw.githubusercontent.com/RougheHz/pluginsforsky/main/dist/com.cookie.moviblast.sky

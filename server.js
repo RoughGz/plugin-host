@@ -10,6 +10,7 @@ const { parseHtml, parse_html, unpackJs } = require("./lib/mini-dom");
 const {
   fetchPluginSourceFromSky,
   listPluginsInGithub,
+  fetchRepoPlugins,
 } = require("./lib/plugin-url");
 
 const PORT = Number(process.env.PORT) || 3000;
@@ -18,27 +19,6 @@ const META_FAST_MS = 3000;
 const NEGATIVE_TTL_MS = 60 * 1000;
 const SOURCE_TTL_MS = 60 * 60 * 1000;
 const META_TIMED_OUT = Symbol("meta.timed.out");
-
-function loadConfig() {
-  for (const p of [
-    path.join(__dirname, "plugins.txt"),
-    path.join(process.cwd(), "plugins.txt"),
-  ]) {
-    try {
-      const out = [];
-      for (const line of fs.readFileSync(p, "utf8").split("\n")) {
-        const t = line.trim();
-        if (!t || t.startsWith("#")) continue;
-        const [id, url] = t.split(/\s+/);
-        if (id && url) out.push({ id, url });
-      }
-      return out;
-    } catch (e) {}
-  }
-  return [];
-}
-const CONFIG = loadConfig();
-const configById = new Map(CONFIG.map((e) => [e.id, e]));
 
 function publicBase(req) {
   const configured = (process.env.PUBLIC_URL || "").replace(/\/$/, "");
@@ -737,9 +717,6 @@ function makePlugin(entry) {
 function pluginForKey(key) {
   let p = pluginsByKey.get(key);
   if (p) return p;
-  const entry = configById.get(key);
-  if (entry) return makePlugin(entry);
-
   try {
     const url = Buffer.from(key, "base64url").toString("utf8");
     if (/^https?:\/\//.test(url)) return makePlugin({ id: key, url });
@@ -1218,34 +1195,24 @@ async function handleRequest(req, res) {
   const base = publicBase(req);
 
   if (STATIC_FILES[urlPath]) return serveStatic(res, STATIC_FILES[urlPath]);
-  if (urlPath === "/api/plugins")
-    return sendJson(res, 200, {
-      plugins: CONFIG.map((e) => ({
-        id: e.id,
-        name: e.name || e.id,
-        addonUrl: base + "/" + e.id + "/manifest.json",
-      })),
-    });
-
   if (urlPath === "/api/plugins-from-url") {
     const q = new URL(req.url, "http://x").searchParams;
     const u = q.get("url") || "";
     if (!u) return sendJson(res, 400, { error: "missing ?url=" });
     try {
-      return sendJson(res, 200, {
-        url: u,
-        plugins: await listPluginsInGithub(u),
-      });
+      const listed = /\.json$/i.test(u)
+        ? await fetchRepoPlugins(u)
+        : await listPluginsInGithub(u);
+      const plugins = Array.isArray(listed) ? listed : listed.plugins || [];
+      return sendJson(res, 200, { url: u, plugins });
     } catch (e) {
       return sendJson(res, 400, { error: String((e && e.message) || e) });
     }
   }
 
   const b64M = /^\/plugin\/([A-Za-z0-9_-]+)(\/.*)$/.exec(urlPath);
-
-  const slugM = /^\/([^/]+)(\/.*)$/.exec(urlPath);
-  const key = b64M ? b64M[1] : slugM ? slugM[1] : null;
-  const rest = b64M ? b64M[2] : slugM ? slugM[2] : "";
+  const key = b64M ? b64M[1] : null;
+  const rest = b64M ? b64M[2] : "";
   if (!key || !rest) return sendJson(res, 404, { error: "not found" });
 
   const plugin = pluginForKey(key);
@@ -1313,10 +1280,6 @@ if (require.main === module) {
   });
   server.listen(PORT, () => {
     console.log("plugin bridge listening on :" + PORT);
-    console.log(
-      "configured plugins:",
-      CONFIG.map((e) => e.id).join(", ") || "(none)",
-    );
   });
 }
 

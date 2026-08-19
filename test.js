@@ -55,7 +55,7 @@ async function main() {
   let started = false;
   for (let i = 0; i < 50; i++) {
     try {
-      const r = await get(BASE + "/api/plugins", 2000);
+      const r = await get(BASE + "/", 2000);
       if (r.status === 200) {
         started = true;
         break;
@@ -78,21 +78,34 @@ async function main() {
     );
 
     
-    const api = await get(BASE + "/api/plugins");
-    const plugins = JSON.parse(api.body).plugins || [];
-    check(
-      "api/plugins lists movieblast",
-      api.status === 200 && plugins.some((p) => p.id === "movieblast"),
-    );
 
     
+    const SKY = BASE + "/plugin/" + Buffer.from("https://raw.githubusercontent.com/RougheHz/pluginsforsky/main/dist/com.cookie.moviblast.sky").toString("base64url");
     const nope = await get(BASE + "/nope/manifest.json");
     check("unknown slug 404s", nope.status === 404);
+
+    try {
+      const r = await get(
+        BASE +
+          "/api/plugins-from-url?url=" +
+          encodeURIComponent(
+            "https://raw.githubusercontent.com/likhithkrishna1103-tech/Hindmovie/main/repo.json",
+          ),
+        60000,
+      );
+      const j = JSON.parse(r.body);
+      check(
+        "repo.json URL lists plugins",
+        r.status === 200 && Array.isArray(j.plugins) && j.plugins.length > 0,
+      );
+    } catch (e) {
+      skip("repo.json", "upstream unreachable: " + e.message);
+    }
 
     
     let manifest = null;
     try {
-      const r = await get(BASE + "/movieblast/manifest.json", 60000);
+      const r = await get(SKY + "/manifest.json", 60000);
       manifest = JSON.parse(r.body);
       check("manifest 200", r.status === 200);
       check(
@@ -108,7 +121,7 @@ async function main() {
       try {
         const r = await get(
           BASE +
-            "/movieblast/catalog/" +
+            SKY + "/catalog/" +
             manifest.catalogs[0].type +
             "/" +
             manifest.catalogs[0].id +
@@ -131,7 +144,7 @@ async function main() {
       "https://app.cloud-mb.xyz/api/media/detail/99999/zzztestid1234567890";
     const t0 = Date.now();
     const meta = await get(
-      BASE + "/movieblast/meta/movie/" + encodeURIComponent(fakeId) + ".json",
+      SKY + "/meta/movie/" + encodeURIComponent(fakeId) + ".json",
       15000,
     );
     const elapsed = Date.now() - t0;

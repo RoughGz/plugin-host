@@ -225,9 +225,13 @@ async function main() {
   const stateBackup = fs.existsSync(statePath)
     ? fs.readFileSync(statePath, "utf8")
     : null;
+  const pluginsTxtPath = path.join(__dirname, "plugins.txt");
+  const pluginsTxtBackup = fs.existsSync(pluginsTxtPath)
+    ? fs.readFileSync(pluginsTxtPath, "utf8")
+    : null;
   fs.rmSync(statePath, { force: true });
   fs.writeFileSync(
-    path.join(__dirname, "plugins.txt"),
+    pluginsTxtPath,
     "https://raw.githubusercontent.com/likhithkrishna1103-tech/Hindmovie/main/repo.json\n",
   );
 
@@ -267,7 +271,8 @@ async function main() {
     server.kill();
     fs.rmSync(testDir, { recursive: true, force: true });
     fs.rmSync(hangDir, { recursive: true, force: true });
-    fs.rmSync(path.join(__dirname, "plugins.txt"), { force: true });
+    if (pluginsTxtBackup === null) fs.rmSync(pluginsTxtPath, { force: true });
+    else fs.writeFileSync(pluginsTxtPath, pluginsTxtBackup);
     if (stateBackup === null) fs.rmSync(statePath, { force: true });
     else fs.writeFileSync(statePath, stateBackup);
     console.error("server failed to boot (port " + PORT + " in use?)");
@@ -754,7 +759,8 @@ async function main() {
       recursive: true,
       force: true,
     });
-    fs.rmSync(path.join(__dirname, "plugins.txt"), { force: true });
+    if (pluginsTxtBackup === null) fs.rmSync(pluginsTxtPath, { force: true });
+    else fs.writeFileSync(pluginsTxtPath, pluginsTxtBackup);
     if (stateBackup === null) fs.rmSync(statePath, { force: true });
     else fs.writeFileSync(statePath, stateBackup);
   }

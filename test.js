@@ -159,6 +159,21 @@ async function main() {
     } catch (e) {
       skip("b64 plugin URL", "upstream unreachable: " + e.message);
     }
+
+    // plain plugin.js (no .sky zip): a raw .js URL must load as-is
+    const b64js = Buffer.from(
+      "https://raw.githubusercontent.com/RougheHz/pluginsforsky/main/Movieblast/plugin.js",
+    ).toString("base64url");
+    try {
+      const r = await get(BASE + "/plugin/" + b64js + "/manifest.json", 60000);
+      const m = JSON.parse(r.body);
+      check(
+        "plain plugin.js manifest 200",
+        r.status === 200 && Array.isArray(m.catalogs) && m.catalogs.length > 0,
+      );
+    } catch (e) {
+      skip("plain plugin.js", "upstream unreachable: " + e.message);
+    }
   } finally {
     server.kill();
     if (failed) console.error("--- server logs ---\n" + logs);

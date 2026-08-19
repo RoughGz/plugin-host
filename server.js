@@ -15,7 +15,6 @@ const {
 
 const PORT = Number(process.env.PORT) || 3000;
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
-const META_FAST_MS = 3000;
 const NEGATIVE_TTL_MS = 60 * 1000;
 const SOURCE_TTL_MS = 60 * 60 * 1000;
 const META_TIMED_OUT = Symbol("meta.timed.out");
@@ -624,7 +623,7 @@ function buildContext(code, descriptor) {
   };
   sandbox.global = sandbox;
   const ctx = vm.createContext(sandbox);
-  vm.runInContext(code, ctx, { timeout: 10000 });
+  vm.runInContext(code, ctx, { timeout: 30000 });
   return ctx;
 }
 
@@ -974,7 +973,7 @@ async function handleCatalog(req, res, plugin, type, catalogId, base) {
 }
 
 async function handleMeta(req, res, plugin, type, id) {
-  let item = await getRawItem(plugin, id, META_FAST_MS);
+  let item = await getRawItem(plugin, id);
   if (!item) {
     item = catalogItemFor(plugin, id);
     if (!item) {

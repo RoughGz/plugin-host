@@ -66,6 +66,19 @@
     />
     <button onclick="makeUrl()">Generate addon URL</button>
     <div class="url" id="out" hidden></div>
+    <h2>Repo / folder URL (all plugins inside)</h2>
+    <p class="hint">
+      Paste a GitHub repo or folder link — every <code>plugin.js</code> /
+      <code>.sky</code> inside gets its own addon URL. Same as above: nothing
+      stored, everything fetched live.
+    </p>
+    <input
+      id="repo"
+      placeholder="https://github.com/user/repo or .../tree/main/folder"
+      spellcheck="false"
+    />
+    <button onclick="listRepo()">List plugins</button>
+    <ul id="repolist"></ul>
     <h2>Bookmarked plugins</h2>
     <ul id="list"></ul>
     <script>
@@ -87,6 +100,41 @@
           location.origin + "/plugin/" + b64url(raw) + "/manifest.json";
         out.innerHTML = '<a href="' + addon + '">' + addon + "</a>";
         out.hidden = false;
+      }
+      function listRepo() {
+        const raw = document.getElementById("repo").value.trim();
+        const ul = document.getElementById("repolist");
+        ul.innerHTML = "";
+        if (!/^https?:\/\//.test(raw)) return;
+        fetch("api/plugins-from-url?url=" + encodeURIComponent(raw))
+          .then((r) => r.json())
+          .then((d) => {
+            if (d.error) {
+              const li = document.createElement("li");
+              li.textContent = d.error;
+              ul.appendChild(li);
+              return;
+            }
+            for (const p of d.plugins || []) {
+              const addon =
+                location.origin + "/plugin/" + b64url(p.url) + "/manifest.json";
+              const li = document.createElement("li");
+              li.innerHTML =
+                "<strong>" +
+                p.name +
+                "</strong> — <a href='" +
+                addon +
+                "'>" +
+                addon +
+                "</a>";
+              ul.appendChild(li);
+            }
+          })
+          .catch((e) => {
+            const li = document.createElement("li");
+            li.textContent = "error: " + e.message;
+            ul.appendChild(li);
+          });
       }
       fetch("api/plugins")
         .then((r) => r.json())

@@ -174,6 +174,26 @@ async function main() {
     } catch (e) {
       skip("plain plugin.js", "upstream unreachable: " + e.message);
     }
+
+    // bundle: a repo/folder URL lists every plugin inside (live, no storage)
+    try {
+      const r = await get(
+        BASE +
+          "/api/plugins-from-url?url=" +
+          encodeURIComponent("https://github.com/RougheHz/pluginsforsky"),
+        30000,
+      );
+      const d = JSON.parse(r.body);
+      check(
+        "bundle repo URL lists plugins",
+        r.status === 200 &&
+          Array.isArray(d.plugins) &&
+          d.plugins.length > 0 &&
+          d.plugins.every((p) => p.name && /^https?:\/\//.test(p.url)),
+      );
+    } catch (e) {
+      skip("bundle repo URL", "upstream unreachable: " + e.message);
+    }
   } finally {
     server.kill();
     if (failed) console.error("--- server logs ---\n" + logs);

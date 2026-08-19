@@ -13,7 +13,7 @@ const crypto = require("node:crypto");
 const { Readable } = require("node:stream");
 const { isPrivateHost } = require("./lib/net-guard");
 const { parseHtml, parse_html, unpackJs } = require("./lib/mini-dom");
-const { fetchPluginSourceFromSky } = require("./lib/plugin-url");
+const { fetchPluginSourceFromSky, listPluginsInGithub } = require("./lib/plugin-url");
 
 const PORT = Number(process.env.PORT) || 3000;
 const CACHE_TTL_MS = 30 * 60 * 1000; // getHome sections cache
@@ -1272,6 +1272,22 @@ async function handleRequest(req, res) {
         addonUrl: base + "/" + e.id + "/manifest.json",
       })),
     });
+
+  // list plugins under any github URL (single file or whole repo) — live,
+  // nothing stored
+  if (urlPath === "/api/plugins-from-url") {
+    const q = new URL(req.url, "http://x").searchParams;
+    const u = q.get("url") || "";
+    if (!u) return sendJson(res, 400, { error: "missing ?url=" });
+    try {
+      return sendJson(res, 200, {
+        url: u,
+        plugins: await listPluginsInGithub(u),
+      });
+    } catch (e) {
+      return sendJson(res, 400, { error: String((e && e.message) || e) });
+    }
+  }
 
   // /plugin/<b64url>/... — plugin identified by its .sky URL in the path
   const b64M = /^\/plugin\/([A-Za-z0-9_-]+)(\/.*)$/.exec(urlPath);

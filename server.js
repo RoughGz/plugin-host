@@ -1270,8 +1270,8 @@ async function handleAddPlugin(req, res) {
   sendJson(res, 201, { plugin: publicPlugin(entry, req) });
 }
 
-// POST /api/repos {url} — fetch a SkyStream repo.json, register its slugs,
-// and install+warm its plugins in the background (categories ready on tap)
+// POST /api/repos {url} — fetch a SkyStream repo.json and list its plugins
+// (does NOT install anything; the client picks what to add)
 async function handleListRepo(req, res) {
   let body;
   try {
@@ -1290,12 +1290,6 @@ async function handleListRepo(req, res) {
       repoPlugins.set(slugify(p.name), { url: p.url, name: p.name });
     }
     saveRepoPlugins();
-    // install + warm in the background so the addon's categories are ready
-    // when the user taps "Install in Stremio" — the dashboard polls
-    // /api/plugins and re-renders as each plugin comes up
-    Promise.allSettled(
-      list.plugins.map((p) => installPluginFromUrl(p.url, p.name)),
-    );
     sendJson(res, 200, list);
   } catch (e) {
     sendJson(res, 400, { error: e.message });
@@ -1399,6 +1393,8 @@ async function handleCatalog(req, res, type, catalogId, search, pool) {
     }
     if (skip > 0) items = items.slice(skip, skip + 20);
   }
+  for (const it of items) catalogIndex.set(it.url || it.id, it);
+  if (catalogIndex.size > 20000) catalogIndex.clear();
   sendJson(res, 200, {
     metas: items
       .map((it) => mapItem(it, found && found.slug))
@@ -1426,6 +1422,11 @@ function decodeId(raw) {
 // load keeps running and caches, so the follow-up stream request is complete.
 const META_FAST_MS = 3000;
 
+// id → catalog item, fed by catalog traffic. On cold start (sections not
+// warmed yet) the meta fallback still has the name/poster of whatever the
+// client just browsed — no state files needed.
+const catalogIndex = new Map();
+
 function catalogItemFor(plugin, id) {
   for (const section of plugin.sections.values())
     for (const item of section.items)
@@ -1433,8 +1434,16 @@ function catalogItemFor(plugin, id) {
       if (item.url === id || item.id === id)
         return {
           ...item,
+          url: item.url || item.id || id,
           episodes: [{ name: "Play", url: id }],
         };
+  const item = catalogIndex.get(id);
+  if (item)
+    return {
+      ...item,
+      url: item.url || item.id || id,
+      episodes: [{ name: "Play", url: id }],
+    };
   return null;
 }
 
@@ -1443,15 +1452,23 @@ async function handleMeta(req, res, type, id, pool) {
   if (!plugin) plugin = await probePluginForId(id, pool);
   if (!plugin) return sendJson(res, 404, { error: "no plugin for id: " + id });
   let item = await getRawItem(plugin, id, META_FAST_MS);
-  if (!item) item = catalogItemFor(plugin, id);
   if (!item) {
-    // cold start: sections are empty until warmAll() finishes, so the catalog
-    // fallback can't help yet — wait for the in-flight load (well under
-    // Nuvio's 60s OkHttp timeout) before giving up
-    item = await getRawItem(plugin, id, 15000);
-    if (!item) item = catalogItemFor(plugin, id);
+    // Nuvio caps meta at 5s — never wait for the slow upstream load. Serve
+    // the catalog fallback (name/poster from the last catalog the client
+    // browsed); the background load keeps running, so the follow-up stream
+    // request gets the real data.
+    item = catalogItemFor(plugin, id);
+    if (!item) {
+      const last = id.split("/").filter(Boolean).pop();
+      item = {
+        id,
+        url: id,
+        type,
+        name: last || id,
+        episodes: [{ name: "Play", url: id }],
+      };
+    }
   }
-  if (!item) return sendJson(res, 404, { error: "meta not found" });
   sendJson(res, 200, { meta: mapMeta(item) });
 }
 

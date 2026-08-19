@@ -3,154 +3,763 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Plugin Bridge</title>
+    <meta
+      name="description"
+      content="Turn any SkyStream plugin into a Stremio or Nuvio addon URL. Nothing installed, everything fetched live."
+    />
+    <title>Plugin Bridge — Addon URL Generator</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='32' y2='32'%3E%3Cstop offset='0' stop-color='%236d5df6'/%3E%3Cstop offset='1' stop-color='%23a855f7'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='8' fill='url(%23g)'/%3E%3Cpath d='M9 22V10l7 7 7-7v12' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
     <style>
-      body {
-        font-family: system-ui, sans-serif;
-        max-width: 640px;
-        margin: 2rem auto;
-        padding: 0 1rem;
-        color: #222;
+      :root {
+        --bg: #0a0c12;
+        --bg-soft: #0f1220;
+        --card: #141828;
+        --card-2: #1a1f33;
+        --border: rgba(255, 255, 255, 0.08);
+        --border-strong: rgba(255, 255, 255, 0.14);
+        --text: #e8eaf2;
+        --muted: #9aa1b5;
+        --faint: #6b7288;
+        --accent: #6d5df6;
+        --accent-2: #a855f7;
+        --accent-soft: rgba(109, 93, 246, 0.14);
+        --green: #34d399;
+        --red: #f87171;
+        --radius: 14px;
+        --radius-sm: 9px;
+        --shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+        --font: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+        --mono:
+          "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
       }
-      h1 {
-        font-size: 1.3rem;
-      }
-      input,
-      button {
-        font-size: 1rem;
-        padding: 0.5rem;
+      * {
         box-sizing: border-box;
       }
-      input {
+      html {
+        scroll-behavior: smooth;
+      }
+      body {
+        margin: 0;
+        background:
+          radial-gradient(
+            900px 420px at 15% -10%,
+            rgba(109, 93, 246, 0.16),
+            transparent 60%
+          ),
+          radial-gradient(
+            800px 400px at 90% -5%,
+            rgba(168, 85, 247, 0.12),
+            transparent 60%
+          ),
+          var(--bg);
+        color: var(--text);
+        font-family: var(--font);
+        font-size: 15px;
+        line-height: 1.55;
+        min-height: 100vh;
+      }
+      a {
+        color: var(--accent-2);
+        text-decoration: none;
+      }
+      a:hover {
+        text-decoration: underline;
+      }
+      .wrap {
+        max-width: 860px;
+        margin: 0 auto;
+        padding: 0 20px;
+      }
+      header {
+        position: sticky;
+        top: 0;
+        z-index: 20;
+        backdrop-filter: blur(14px);
+        background: rgba(10, 12, 18, 0.78);
+        border-bottom: 1px solid var(--border);
+      }
+      .topbar {
+        max-width: 860px;
+        margin: 0 auto;
+        padding: 14px 20px;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+      .logo {
+        width: 38px;
+        height: 38px;
+        border-radius: 10px;
+        flex: none;
+      }
+      .brand-name {
+        font-weight: 700;
+        font-size: 16px;
+        letter-spacing: -0.01em;
+      }
+      .brand-sub {
+        font-size: 12px;
+        color: var(--muted);
+        margin-top: -2px;
+      }
+      .spacer {
+        flex: 1;
+      }
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--green);
+        background: rgba(52, 211, 153, 0.1);
+        border: 1px solid rgba(52, 211, 153, 0.25);
+        padding: 5px 11px;
+        border-radius: 999px;
+      }
+      .badge .dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--green);
+        box-shadow: 0 0 8px var(--green);
+        animation: pulse 2.2s ease-in-out infinite;
+      }
+      @keyframes pulse {
+        0%,
+        100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.35;
+        }
+      }
+      .hero {
+        padding: 64px 0 40px;
+        text-align: center;
+      }
+      .hero h1 {
+        font-size: clamp(30px, 5vw, 46px);
+        font-weight: 800;
+        letter-spacing: -0.03em;
+        line-height: 1.12;
+        margin: 0 0 14px;
+      }
+      .hero h1 .grad {
+        background: linear-gradient(100deg, var(--accent), var(--accent-2));
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+      }
+      .hero p {
+        color: var(--muted);
+        max-width: 560px;
+        margin: 0 auto 26px;
+        font-size: 16px;
+      }
+      .chips {
+        display: flex;
+        gap: 10px;
+        justify-content: center;
+        flex-wrap: wrap;
+      }
+      .chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 13px;
+        color: var(--muted);
+        background: var(--card);
+        border: 1px solid var(--border);
+        padding: 7px 14px;
+        border-radius: 999px;
+      }
+      .chip b {
+        color: var(--text);
+        font-weight: 600;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 18px;
+        margin: 8px 0 34px;
+      }
+      @media (max-width: 760px) {
+        .grid {
+          grid-template-columns: 1fr;
+        }
+      }
+      .card {
+        background: linear-gradient(180deg, var(--card), var(--bg-soft));
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 24px;
+        box-shadow: var(--shadow);
+        display: flex;
+        flex-direction: column;
+      }
+      .card h2 {
+        font-size: 17px;
+        font-weight: 700;
+        margin: 0 0 4px;
+        letter-spacing: -0.01em;
+      }
+      .card .desc {
+        color: var(--muted);
+        font-size: 13.5px;
+        margin: 0 0 18px;
+      }
+      .field {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        margin-bottom: 14px;
+      }
+      .field label {
+        font-size: 12.5px;
+        font-weight: 600;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+      }
+      input[type="url"],
+      input[type="text"] {
         width: 100%;
+        background: var(--bg);
+        border: 1px solid var(--border-strong);
+        color: var(--text);
+        font-family: var(--mono);
+        font-size: 13px;
+        padding: 12px 14px;
+        border-radius: var(--radius-sm);
+        outline: none;
+        transition:
+          border-color 0.15s,
+          box-shadow 0.15s;
       }
-      button {
-        margin-top: 0.5rem;
+      input:focus {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 3px var(--accent-soft);
+      }
+      input::placeholder {
+        color: var(--faint);
+      }
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        border: none;
         cursor: pointer;
+        font-family: var(--font);
+        font-size: 14px;
+        font-weight: 600;
+        padding: 12px 18px;
+        border-radius: var(--radius-sm);
+        transition:
+          transform 0.1s,
+          filter 0.15s,
+          opacity 0.15s;
       }
-      .url {
+      .btn:active {
+        transform: translateY(1px);
+      }
+      .btn:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+      }
+      .btn-primary {
+        background: linear-gradient(100deg, var(--accent), var(--accent-2));
+        color: #fff;
+      }
+      .btn-primary:hover:not(:disabled) {
+        filter: brightness(1.1);
+      }
+      .btn-ghost {
+        background: transparent;
+        border: 1px solid var(--border-strong);
+        color: var(--text);
+      }
+      .btn-ghost:hover:not(:disabled) {
+        background: rgba(255, 255, 255, 0.05);
+      }
+      .btn-sm {
+        padding: 7px 12px;
+        font-size: 12.5px;
+      }
+      .result {
+        margin-top: 4px;
+        border: 1px solid var(--border);
+        background: var(--bg);
+        border-radius: var(--radius-sm);
+        padding: 12px 14px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .result .url-text {
+        flex: 1;
+        font-family: var(--mono);
+        font-size: 12px;
+        color: var(--muted);
         word-break: break-all;
-        background: #f4f4f4;
-        padding: 0.75rem;
-        border-radius: 6px;
-        margin-top: 1rem;
+        line-height: 1.45;
+        max-height: 84px;
+        overflow-y: auto;
       }
-      .url a {
-        color: #06c;
+      .result .url-text a {
+        color: var(--accent-2);
       }
-      ul {
+      .error {
+        color: var(--red);
+        font-size: 13px;
+        margin-top: 10px;
+      }
+      .list {
         list-style: none;
+        margin: 0;
         padding: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
       }
-      li {
-        margin: 0.5rem 0;
+      .list li {
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-sm);
+        padding: 12px 14px;
+        display: flex;
+        align-items: center;
+        gap: 12px;
       }
-      .hint {
-        color: #666;
-        font-size: 0.9rem;
+      .list .p-name {
+        font-weight: 600;
+        font-size: 14px;
+        min-width: 130px;
+      }
+      .list .p-url {
+        flex: 1;
+        font-family: var(--mono);
+        font-size: 11.5px;
+        color: var(--faint);
+        word-break: break-all;
+        line-height: 1.4;
+      }
+      .list .p-actions {
+        display: flex;
+        gap: 6px;
+        flex: none;
+      }
+      .empty {
+        color: var(--faint);
+        font-size: 13.5px;
+        text-align: center;
+        padding: 18px 0;
+      }
+      .section-title {
+        font-size: 15px;
+        font-weight: 700;
+        margin: 34px 0 14px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .section-title .count {
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--muted);
+        background: var(--card);
+        border: 1px solid var(--border);
+        padding: 2px 9px;
+        border-radius: 999px;
+      }
+      .how {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 14px;
+        margin: 8px 0 40px;
+      }
+      @media (max-width: 760px) {
+        .how {
+          grid-template-columns: 1fr;
+        }
+      }
+      .step {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 18px;
+      }
+      .step .n {
+        width: 26px;
+        height: 26px;
+        border-radius: 8px;
+        background: var(--accent-soft);
+        color: var(--accent-2);
+        font-weight: 700;
+        font-size: 13px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        margin-bottom: 10px;
+      }
+      .step h3 {
+        font-size: 14px;
+        margin: 0 0 6px;
+      }
+      .step p {
+        font-size: 13px;
+        color: var(--muted);
+        margin: 0;
+      }
+      footer {
+        border-top: 1px solid var(--border);
+        padding: 22px 0 34px;
+        text-align: center;
+        color: var(--faint);
+        font-size: 12.5px;
+      }
+      .toast {
+        position: fixed;
+        bottom: 24px;
+        left: 50%;
+        transform: translateX(-50%) translateY(80px);
+        background: var(--card-2);
+        border: 1px solid var(--border-strong);
+        color: var(--text);
+        font-size: 13.5px;
+        font-weight: 500;
+        padding: 11px 20px;
+        border-radius: 999px;
+        box-shadow: var(--shadow);
+        opacity: 0;
+        transition:
+          transform 0.25s ease,
+          opacity 0.25s ease;
+        z-index: 50;
+        pointer-events: none;
+      }
+      .toast.show {
+        transform: translateX(-50%) translateY(0);
+        opacity: 1;
+      }
+      .spinner {
+        width: 14px;
+        height: 14px;
+        border: 2px solid rgba(255, 255, 255, 0.35);
+        border-top-color: #fff;
+        border-radius: 50%;
+        animation: spin 0.7s linear infinite;
+      }
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      :focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 2px;
+      }
+      ::selection {
+        background: rgba(109, 93, 246, 0.4);
       }
     </style>
   </head>
   <body>
-    <h1>Plugin Bridge</h1>
-    <p class="hint">
-      Paste a plugin URL (a <code>.sky</code> bundle or
-      <code>plugin.js</code> link) and get an addon URL to paste into Stremio /
-      Nuvio. Nothing is installed on the server — the addon URL carries the
-      plugin link itself.
-    </p>
-    <input
-      id="url"
-      placeholder="https://raw.githubusercontent.com/.../plugin.sky"
-      spellcheck="false"
-    />
-    <button onclick="makeUrl()">Generate addon URL</button>
-    <div class="url" id="out" hidden></div>
-    <h2>Repo / folder URL (all plugins inside)</h2>
-    <p class="hint">
-      Paste a GitHub repo or folder link — every <code>plugin.js</code> /
-      <code>.sky</code> inside gets its own addon URL. Same as above: nothing
-      stored, everything fetched live.
-    </p>
-    <input
-      id="repo"
-      placeholder="https://github.com/user/repo or .../tree/main/folder"
-      spellcheck="false"
-    />
-    <button onclick="listRepo()">List plugins</button>
-    <ul id="repolist"></ul>
-    <h2>Bookmarked plugins</h2>
-    <ul id="list"></ul>
+    <header>
+      <div class="topbar">
+        <svg class="logo" viewBox="0 0 32 32" aria-hidden="true">
+          <defs>
+            <linearGradient id="g" x1="0" y1="0" x2="32" y2="32">
+              <stop offset="0" stop-color="#6d5df6" />
+              <stop offset="1" stop-color="#a855f7" />
+            </linearGradient>
+          </defs>
+          <rect width="32" height="32" rx="8" fill="url(#g)" />
+          <path
+            d="M9 22V10l7 7 7-7v12"
+            stroke="white"
+            stroke-width="3"
+            fill="none"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+        </svg>
+        <div>
+          <div class="brand-name">Plugin Bridge</div>
+          <div class="brand-sub">Addon URL generator</div>
+        </div>
+        <div class="spacer"></div>
+        <span class="badge"><span class="dot"></span>Live</span>
+      </div>
+    </header>
+
+    <main class="wrap">
+      <section class="hero">
+        <h1>One link.<br /><span class="grad">Every plugin.</span></h1>
+        <p>
+          Paste any SkyStream plugin — a <code>.sky</code> bundle, a plain
+          <code>plugin.js</code>, or a whole GitHub repo — and get an addon URL
+          for Stremio or Nuvio. Nothing is installed or stored; everything is
+          fetched live from the source.
+        </p>
+        <div class="chips">
+          <span class="chip"><b id="statPlugins">0</b> bookmarked plugins</span>
+          <span class="chip">.sky bundles</span>
+          <span class="chip">plain plugin.js</span>
+          <span class="chip">repo &amp; folder URLs</span>
+        </div>
+      </section>
+
+      <section class="grid">
+        <div class="card">
+          <h2>Single plugin</h2>
+          <p class="desc">
+            One plugin file or folder link becomes one addon URL.
+          </p>
+          <div class="field">
+            <label for="url">Plugin URL</label>
+            <input
+              id="url"
+              type="url"
+              spellcheck="false"
+              placeholder="https://github.com/user/repo/blob/main/plugin.js"
+            />
+          </div>
+          <button id="genBtn" class="btn btn-primary">
+            Generate addon URL
+          </button>
+          <div class="result" id="singleOut" hidden>
+            <div class="url-text" id="singleUrl"></div>
+            <button class="btn btn-ghost btn-sm" id="copySingle">Copy</button>
+          </div>
+          <div class="error" id="singleErr" hidden></div>
+        </div>
+
+        <div class="card">
+          <h2>Repo or folder</h2>
+          <p class="desc">Every plugin inside gets its own addon URL.</p>
+          <div class="field">
+            <label for="repo">Repo / folder URL</label>
+            <input
+              id="repo"
+              type="url"
+              spellcheck="false"
+              placeholder="https://github.com/user/repo"
+            />
+          </div>
+          <button id="listBtn" class="btn btn-primary">List plugins</button>
+          <ul class="list" id="repoList"></ul>
+          <div class="error" id="repoErr" hidden></div>
+        </div>
+      </section>
+
+      <h2 class="section-title">
+        Bookmarked plugins <span class="count" id="bookmarkCount">0</span>
+      </h2>
+      <ul class="list" id="bookmarks"></ul>
+
+      <h2 class="section-title">How it works</h2>
+      <section class="how">
+        <div class="step">
+          <span class="n">1</span>
+          <h3>Paste a plugin link</h3>
+          <p>
+            A .sky bundle, a plugin.js file, a folder, or an entire repo —
+            GitHub links work as-is.
+          </p>
+        </div>
+        <div class="step">
+          <span class="n">2</span>
+          <h3>Get an addon URL</h3>
+          <p>
+            The full source link is encoded into the addon URL itself. Nothing
+            is stored on the server.
+          </p>
+        </div>
+        <div class="step">
+          <span class="n">3</span>
+          <h3>Add it to your app</h3>
+          <p>
+            Paste the addon URL into Stremio or Nuvio. It survives restarts and
+            always fetches the latest plugin.
+          </p>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      Plugin Bridge — stateless addon hosting. Plugins are fetched live from
+      their public GitHub sources.
+    </footer>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
     <script>
-      function b64url(s) {
-        return btoa(unescape(encodeURIComponent(s)))
+      const $ = (id) => document.getElementById(id);
+      const b64url = (s) =>
+        btoa(unescape(encodeURIComponent(s)))
           .replace(/\+/g, "-")
           .replace(/\//g, "_")
           .replace(/=+$/, "");
+      const addonUrl = (u) =>
+        location.origin + "/plugin/" + b64url(u) + "/manifest.json";
+      let toastTimer = null;
+      function toast(msg) {
+        const t = $("toast");
+        t.textContent = msg;
+        t.classList.add("show");
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => t.classList.remove("show"), 2200);
       }
-      function makeUrl() {
-        const raw = document.getElementById("url").value.trim();
-        const out = document.getElementById("out");
+      function copyText(text) {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(
+            () => toast("Copied to clipboard"),
+            () => fallbackCopy(text),
+          );
+        } else {
+          fallbackCopy(text);
+        }
+      }
+      function fallbackCopy(text) {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        try {
+          document.execCommand("copy");
+          toast("Copied to clipboard");
+        } catch (e) {
+          toast("Copy failed — select the URL manually");
+        }
+        document.body.removeChild(ta);
+      }
+      function setBusy(btn, busy) {
+        if (busy) {
+          btn.dataset.label = btn.innerHTML;
+          btn.innerHTML = '<span class="spinner"></span>';
+          btn.disabled = true;
+        } else {
+          btn.innerHTML = btn.dataset.label || btn.innerHTML;
+          btn.disabled = false;
+        }
+      }
+      function showErr(el, msg) {
+        el.textContent = msg;
+        el.hidden = false;
+      }
+      function hideErr(el) {
+        el.hidden = true;
+      }
+      function makeRow(name, url, addon) {
+        const li = document.createElement("li");
+        const nameEl = document.createElement("span");
+        nameEl.className = "p-name";
+        nameEl.textContent = name;
+        const urlEl = document.createElement("span");
+        urlEl.className = "p-url";
+        urlEl.textContent = url;
+        const actions = document.createElement("span");
+        actions.className = "p-actions";
+        const copyBtn = document.createElement("button");
+        copyBtn.className = "btn btn-ghost btn-sm";
+        copyBtn.textContent = "Copy";
+        copyBtn.onclick = () => copyText(addon);
+        const openBtn = document.createElement("button");
+        openBtn.className = "btn btn-ghost btn-sm";
+        openBtn.textContent = "Open";
+        openBtn.onclick = () => window.open(addon, "_blank");
+        actions.append(copyBtn, openBtn);
+        li.append(nameEl, urlEl, actions);
+        return li;
+      }
+      $("genBtn").addEventListener("click", () => {
+        const raw = $("url").value.trim();
+        hideErr($("singleErr"));
+        $("singleOut").hidden = true;
         if (!/^https?:\/\//.test(raw)) {
-          out.textContent = "enter a valid https URL";
-          out.hidden = false;
+          showErr($("singleErr"), "Enter a valid https:// URL");
           return;
         }
-        const addon =
-          location.origin + "/plugin/" + b64url(raw) + "/manifest.json";
-        out.innerHTML = '<a href="' + addon + '">' + addon + "</a>";
-        out.hidden = false;
-      }
-      function listRepo() {
-        const raw = document.getElementById("repo").value.trim();
-        const ul = document.getElementById("repolist");
+        const addon = addonUrl(raw);
+        const link = document.createElement("a");
+        link.href = addon;
+        link.textContent = addon;
+        $("singleUrl").innerHTML = "";
+        $("singleUrl").appendChild(link);
+        $("singleOut").hidden = false;
+        $("copySingle").onclick = () => copyText(addon);
+      });
+      $("url").addEventListener("keydown", (e) => {
+        if (e.key === "Enter") $("genBtn").click();
+      });
+      $("listBtn").addEventListener("click", async () => {
+        const raw = $("repo").value.trim();
+        const ul = $("repoList");
+        const btn = $("listBtn");
+        hideErr($("repoErr"));
         ul.innerHTML = "";
-        if (!/^https?:\/\//.test(raw)) return;
-        fetch("api/plugins-from-url?url=" + encodeURIComponent(raw))
-          .then((r) => r.json())
-          .then((d) => {
-            if (d.error) {
-              const li = document.createElement("li");
-              li.textContent = d.error;
-              ul.appendChild(li);
-              return;
-            }
-            for (const p of d.plugins || []) {
-              const addon =
-                location.origin + "/plugin/" + b64url(p.url) + "/manifest.json";
-              const li = document.createElement("li");
-              li.innerHTML =
-                "<strong>" +
-                p.name +
-                "</strong> — <a href='" +
-                addon +
-                "'>" +
-                addon +
-                "</a>";
-              ul.appendChild(li);
-            }
-          })
-          .catch((e) => {
+        if (!/^https?:\/\//.test(raw)) {
+          showErr($("repoErr"), "Enter a valid https:// URL");
+          return;
+        }
+        setBusy(btn, true);
+        try {
+          const r = await fetch(
+            "api/plugins-from-url?url=" + encodeURIComponent(raw),
+          );
+          const d = await r.json();
+          if (d.error) {
+            showErr($("repoErr"), d.error);
+            return;
+          }
+          if (!d.plugins || !d.plugins.length) {
             const li = document.createElement("li");
-            li.textContent = "error: " + e.message;
+            li.className = "empty";
+            li.textContent = "No plugins found under this URL.";
             ul.appendChild(li);
-          });
-      }
+            return;
+          }
+          for (const p of d.plugins) {
+            ul.appendChild(makeRow(p.name, p.url, addonUrl(p.url)));
+          }
+        } catch (e) {
+          showErr($("repoErr"), "Request failed: " + e.message);
+        } finally {
+          setBusy(btn, false);
+        }
+      });
+      $("repo").addEventListener("keydown", (e) => {
+        if (e.key === "Enter") $("listBtn").click();
+      });
       fetch("api/plugins")
         .then((r) => r.json())
         .then((d) => {
-          const ul = document.getElementById("list");
-          for (const p of d.plugins || []) {
+          const list = d.plugins || [];
+          $("statPlugins").textContent = list.length;
+          $("bookmarkCount").textContent = list.length;
+          const ul = $("bookmarks");
+          if (!list.length) {
             const li = document.createElement("li");
-            li.innerHTML =
-              "<strong>" +
-              p.name +
-              "</strong> — <a href='" +
-              p.addonUrl +
-              "'>" +
-              p.addonUrl +
-              "</a>";
+            li.className = "empty";
+            li.textContent = "No bookmarked plugins yet.";
             ul.appendChild(li);
+            return;
+          }
+          for (const p of list) {
+            ul.appendChild(makeRow(p.name, p.addonUrl, p.addonUrl));
           }
         })
         .catch(() => {});

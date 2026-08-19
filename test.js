@@ -1,6 +1,6 @@
-// Bridge self-test: boots the stateless server and exercises the addon
-// protocol. Network-dependent checks degrade to SKIP when the upstream is
-// unreachable; the meta-timing check (the Nuvio 5s cap) always runs.
+
+
+
 "use strict";
 const http = require("node:http");
 const { spawn } = require("node:child_process");
@@ -51,7 +51,7 @@ async function main() {
   server.stdout.on("data", (c) => (logs += c));
   server.stderr.on("data", (c) => (logs += c));
 
-  // wait for boot
+  
   let started = false;
   for (let i = 0; i < 50; i++) {
     try {
@@ -70,14 +70,14 @@ async function main() {
   }
 
   try {
-    // static dashboard
+    
     const dash = await get(BASE + "/");
     check(
       "dashboard serves",
       dash.status === 200 && dash.body.includes("Plugin Bridge"),
     );
 
-    // config list
+    
     const api = await get(BASE + "/api/plugins");
     const plugins = JSON.parse(api.body).plugins || [];
     check(
@@ -85,11 +85,11 @@ async function main() {
       api.status === 200 && plugins.some((p) => p.id === "movieblast"),
     );
 
-    // unknown slug
+    
     const nope = await get(BASE + "/nope/manifest.json");
     check("unknown slug 404s", nope.status === 404);
 
-    // manifest (network: fetches the .sky bundle)
+    
     let manifest = null;
     try {
       const r = await get(BASE + "/movieblast/manifest.json", 60000);
@@ -103,7 +103,7 @@ async function main() {
       skip("manifest", "upstream unreachable: " + e.message);
     }
 
-    // catalog (network)
+    
     if (manifest && manifest.catalogs.length) {
       try {
         const r = await get(
@@ -125,8 +125,8 @@ async function main() {
       }
     }
 
-    // meta timing: the Nuvio 5s cap — a fake id must answer fast with the
-    // generic fallback, never wait for the slow upstream load
+    
+    
     const fakeId =
       "https://app.cloud-mb.xyz/api/media/detail/99999/zzztestid1234567890";
     const t0 = Date.now();
@@ -145,7 +145,7 @@ async function main() {
         metaBody.meta.name.length > 0,
     );
 
-    // b64 form: plugin URL carried in the path (no config)
+    
     const b64 = Buffer.from(
       "https://raw.githubusercontent.com/RougheHz/pluginsforsky/main/dist/com.cookie.moviblast.sky",
     ).toString("base64url");
@@ -160,7 +160,7 @@ async function main() {
       skip("b64 plugin URL", "upstream unreachable: " + e.message);
     }
 
-    // plain plugin.js (no .sky zip): a raw .js URL must load as-is
+    
     const b64js = Buffer.from(
       "https://raw.githubusercontent.com/RougheHz/pluginsforsky/main/Movieblast/plugin.js",
     ).toString("base64url");
@@ -175,7 +175,7 @@ async function main() {
       skip("plain plugin.js", "upstream unreachable: " + e.message);
     }
 
-    // bundle: a repo/folder URL lists every plugin inside (live, no storage)
+    
     try {
       const r = await get(
         BASE +

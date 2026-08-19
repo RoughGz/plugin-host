@@ -1,9 +1,3 @@
-// Stateless plugin bridge: serves the Stremio addon protocol backed by remote
-// .sky plugin bundles. No installs, no state files, no worker threads — every
-// request resolves the plugin (slug config or URL in the path), loads its
-// source (cached), evaluates it in a vm sandbox, and calls the matching global
-// (getHome/load/loadStreams/search). Runs anywhere Node runs: Render/Railway/
-// Fly/VPS (node server.js) and Vercel serverless (api/bridge.js + vercel.json).
 "use strict";
 const http = require("node:http");
 const fs = require("node:fs");
@@ -13,19 +7,19 @@ const crypto = require("node:crypto");
 const { Readable } = require("node:stream");
 const { isPrivateHost } = require("./lib/net-guard");
 const { parseHtml, parse_html, unpackJs } = require("./lib/mini-dom");
-const { fetchPluginSourceFromSky, listPluginsInGithub } = require("./lib/plugin-url");
+const {
+  fetchPluginSourceFromSky,
+  listPluginsInGithub,
+} = require("./lib/plugin-url");
 
 const PORT = Number(process.env.PORT) || 3000;
-const CACHE_TTL_MS = 30 * 60 * 1000; // getHome sections cache
-const META_FAST_MS = 3000; // Nuvio caps meta at 5s incl. connection — never wait longer
+const CACHE_TTL_MS = 30 * 60 * 1000;
+const META_FAST_MS = 3000;
 const NEGATIVE_TTL_MS = 60 * 1000;
-const SOURCE_TTL_MS = 60 * 60 * 1000; // .sky source cache
+const SOURCE_TTL_MS = 60 * 60 * 1000;
 const META_TIMED_OUT = Symbol("meta.timed.out");
 
-// ---------- config ----------
-
 function loadConfig() {
-  // plugins.txt: one "slug URL" per line (# comments and blank lines allowed)
   for (const p of [
     path.join(__dirname, "plugins.txt"),
     path.join(process.cwd(), "plugins.txt"),
@@ -45,8 +39,6 @@ function loadConfig() {
 }
 const CONFIG = loadConfig();
 const configById = new Map(CONFIG.map((e) => [e.id, e]));
-
-// ---------- helpers ----------
 
 function publicBase(req) {
   const configured = (process.env.PUBLIC_URL || "").replace(/\/$/, "");
@@ -80,7 +72,6 @@ function slugify(s) {
   );
 }
 
-// clients (Nuvio, Stremio) percent-encode the id exactly once — decode once.
 function decodeId(raw) {
   try {
     return decodeURIComponent(raw);
@@ -132,8 +123,7 @@ function itemPoster(item) {
 
 function mapItem(item, sectionSlug) {
   let type = mapType(item.type);
-  // plugins often label every catalog row "movie" while the detail page is a
-  // series — a series-y section slug wins so the home board shows it as series
+
   if (
     type === "movie" &&
     sectionSlug &&
@@ -205,13 +195,12 @@ function mapMeta(item) {
     if (episodes.length > 1) type = "series";
     else if (episodes.length === 1) type = "movie";
   }
-  // SkyStream parity: a series with exactly one episode is a movie (VOD)
+
   if (type === "series" && episodes.length === 1) type = "movie";
   const videos = episodes
     .map((ep, i) => {
       const n = epNumbers(ep, i);
-      // stream ids embed the meta id (item.url) so clients request
-      // /stream/.../<url>:<s>:<e>.json; movies keep a plain id
+
       const isMovie = type === "movie";
       return {
         id: isMovie ? item.url : item.url + ":" + n.season + ":" + n.episode,
@@ -223,8 +212,7 @@ function mapMeta(item) {
       };
     })
     .sort((a, b) => a.season - b.season || a.episode - b.episode);
-  // plugins may return streams directly without episodes — still give the
-  // client one playable video so the detail page loads and streams resolve
+
   if (!videos.length && Array.isArray(item.streams) && item.streams.length) {
     videos.push({
       id: item.url,
@@ -265,11 +253,6 @@ function filenameFromUrl(u) {
   }
 }
 
-// Streams are returned DIRECT (no proxy wrapper): the upstream CDNs serve
-// without special headers (verified for movieblast), so the player fetches
-// straight from the CDN — no server bandwidth, no response-size limits, works
-// on any host. Only m3u8 playlists go through the proxy: their segment lines
-// are MAGIC_PROXY-wrapped by the plugin and must be rewritten.
 function mapStream(s, base, pluginName) {
   const q = typeof s.quality === "number" ? QUALITY_MAP[s.quality] : s.quality;
   const title = [s.source && s.source !== "Auto" ? s.source : "", q]
@@ -286,7 +269,7 @@ function mapStream(s, base, pluginName) {
       );
   const out = { url };
   if (title) out.title = title;
-  // protocol: notWebReady=true unless the URL is a direct https MP4
+
   out.behaviorHints = {
     notWebReady: !/^https:\/\/.+\.mp4($|\?)/i.test(url),
   };
@@ -302,9 +285,7 @@ function mapStream(s, base, pluginName) {
   }
   return out;
 }
-// ---------- plugin runtime (in-process vm sandbox) ----------
 
-// plugins are untrusted: never let them reach loopback/link-local/metadata
 async function httpRequest(method, url, headers, body) {
   const DEFAULT_UA =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36";
@@ -436,7 +417,6 @@ function http_get(url, headers, cb) {
   });
 }
 function http_post(url, headers, body, cb) {
-  // legacy quirk preserved from the Dart host: (url, body, headers) form
   if (
     headers &&
     typeof headers === "object" &&
@@ -495,8 +475,6 @@ const webcrypto = {
   },
 };
 
-// in-memory only: stateless by design (token-caching plugins re-mint per
-// instance; acceptable, keeps the bridge hostable on serverless)
 const storage = new Map();
 function get_storage(req) {
   const v = storage.get(String((req && req.key) || ""));
@@ -670,7 +648,6 @@ function buildContext(code, descriptor) {
   return ctx;
 }
 
-// call a plugin global that takes a callback (and may also return a promise)
 function invoke(ctx, fn, args) {
   return new Promise((resolve) => {
     let settled = false;
@@ -725,9 +702,7 @@ function callPlugin(plugin, fn, args) {
   );
 }
 
-// ---------- plugin lifecycle ----------
-
-const sourceCache = new Map(); // url -> {code, descriptor, ts}
+const sourceCache = new Map();
 async function loadSource(url) {
   const cached = sourceCache.get(url);
   if (cached && Date.now() - cached.ts < SOURCE_TTL_MS) return cached;
@@ -737,7 +712,7 @@ async function loadSource(url) {
   return src;
 }
 
-const pluginsByKey = new Map(); // slug or b64-key -> plugin
+const pluginsByKey = new Map();
 function makePlugin(entry) {
   const p = {
     id: entry.id,
@@ -764,7 +739,7 @@ function pluginForKey(key) {
   if (p) return p;
   const entry = configById.get(key);
   if (entry) return makePlugin(entry);
-  // b64 form: key is base64url of the plugin .sky URL
+
   try {
     const url = Buffer.from(key, "base64url").toString("utf8");
     if (/^https?:\/\//.test(url)) return makePlugin({ id: key, url });
@@ -798,7 +773,7 @@ async function warmPlugin(plugin) {
       return;
     const res = await callPlugin(plugin, "getHome", []);
     if (!res.success || !res.data || typeof res.data !== "object") {
-      plugin.sectionsTs = Date.now(); // cache the failure so catalogs don't re-call every request
+      plugin.sectionsTs = Date.now();
       plugin.status = "error";
       plugin.error = res.message || "getHome failed";
       console.warn(
@@ -815,7 +790,7 @@ async function warmPlugin(plugin) {
     const built = new Map();
     for (const [name, items] of Object.entries(sectionMap)) {
       if (!Array.isArray(items) || !items.length) continue;
-      // plugins sometimes sprinkle null/undefined into their lists
+
       const clean = items.filter((i) => i && typeof i === "object");
       if (!clean.length) continue;
       built.set(slugify(name), {
@@ -825,15 +800,13 @@ async function warmPlugin(plugin) {
       });
     }
     if (!built.size) {
-      // no sections (flaky/blocked upstream) — keep existing, stale beats empty
       plugin.sectionsTs = Date.now();
       plugin.status = "error";
       plugin.error = "getHome returned no sections";
       console.warn("plugin", plugin.name, "getHome returned no sections");
       return;
     }
-    // merge, don't replace: plugins drop sections whose page fetch failed at
-    // warm time — keep stale sections, fresh ones win
+
     for (const [slug, section] of plugin.sections) {
       if (!built.has(slug)) built.set(slug, section);
     }
@@ -867,7 +840,7 @@ async function getRawItem(plugin, metaId, timeoutMs) {
   const cached = plugin.metaCache.get(metaId);
   const ttl = cached && cached.ttl ? cached.ttl : CACHE_TTL_MS;
   if (cached && Date.now() - cached.ts < ttl) return cached.value;
-  // one in-flight load per id: fast meta and follow-up stream share the call
+
   let load = plugin.pendingLoads.get(metaId);
   if (!load) {
     load = callPlugin(plugin, "load", [metaId]);
@@ -888,10 +861,8 @@ async function getRawItem(plugin, metaId, timeoutMs) {
         new Promise((r) => setTimeout(() => r(META_TIMED_OUT), timeoutMs)),
       ])
     : await load;
-  if (res === META_TIMED_OUT) return null; // load still running; no negative cache
+  if (res === META_TIMED_OUT) return null;
   if (!res.success || !res.data || typeof res.data !== "object") {
-    // negative cache: a dead id must not re-trigger the full slow load — but
-    // keep it short so a transient upstream failure recovers on the next tap
     cachePut(plugin.metaCache, metaId, Date.now(), null, NEGATIVE_TTL_MS);
     return null;
   }
@@ -901,7 +872,6 @@ async function getRawItem(plugin, metaId, timeoutMs) {
 function catalogItemFor(plugin, id) {
   for (const section of plugin.sections.values())
     for (const item of section.items)
-      // plugins differ: some emit url, some emit id (movieblast) — match both
       if (item.url === id || item.id === id)
         return {
           ...item,
@@ -917,7 +887,6 @@ function catalogItemFor(plugin, id) {
     };
   return null;
 }
-// ---------- endpoint handlers ----------
 
 function catalogList(plugin) {
   const label = plugin.descriptor.name || plugin.name;
@@ -928,8 +897,6 @@ function catalogList(plugin) {
   ];
   const out = [];
   if (plugin.sections.size === 0) {
-    // not warmed yet: advertise the descriptor's declared catalogs so the
-    // addon is visible immediately (a slow getHome must not hide it)
     for (const c of plugin.descriptor.catalogs || []) {
       out.push({
         id: c.id || prefix + "_" + (c.name || slugify(c.id || "")),
@@ -985,8 +952,6 @@ async function handleCatalog(req, res, plugin, type, catalogId, base) {
   let items = [];
   let found = null;
   if (search) {
-    // global search hits /catalog/<type>/<id>.json?search=... — route to the
-    // plugin's search and merge
     const fn =
       typeof plugin.ctx.search === "function"
         ? "search"
@@ -1010,7 +975,7 @@ async function handleCatalog(req, res, plugin, type, catalogId, base) {
     if (!found)
       return sendJson(res, 404, { error: "unknown catalog: " + catalogId });
     if (Date.now() - plugin.sectionsTs > CACHE_TTL_MS) await warmPlugin(plugin);
-    found = findSection(plugin, catalogId); // re-lookup after warm
+    found = findSection(plugin, catalogId);
     if (!found) return sendJson(res, 200, { metas: [] });
     items = found.section.items;
     if (genre) {
@@ -1033,10 +998,6 @@ async function handleCatalog(req, res, plugin, type, catalogId, base) {
 async function handleMeta(req, res, plugin, type, id) {
   let item = await getRawItem(plugin, id, META_FAST_MS);
   if (!item) {
-    // Nuvio caps meta at 5s — never wait for the slow upstream load. Serve
-    // the catalog fallback (name/poster from the last catalog the client
-    // browsed); the background load keeps running, so the follow-up stream
-    // request gets the real data.
     item = catalogItemFor(plugin, id);
     if (!item) {
       const last = id.split("/").filter(Boolean).pop();
@@ -1059,7 +1020,7 @@ async function loadStreamsFor(plugin, id) {
 
 async function handleStream(req, res, plugin, type, id, base) {
   let raw = [];
-  // SkyStream convention: series video ids are <metaId>:<season>:<episode>
+
   const m = /^(.*):(\d+):(\d+)$/.exec(id);
   if (m) {
     const metaId = m[1];
@@ -1089,8 +1050,6 @@ async function handleStream(req, res, plugin, type, id, base) {
       .map((s) => mapStream(s, base, plugin.name)),
   });
 }
-
-// ---------- proxy (m3u8 rewrite + byte streaming with Range) ----------
 
 async function fetchSafe(url, headers, maxHops, signal) {
   let cur = url;
@@ -1135,7 +1094,6 @@ async function handleProxy(req, res, plugin, payloadPath) {
   const base = publicBase(req);
 
   if (decoded.startsWith("#EXTM3U")) {
-    // rewrite magic-wrapped segment URIs to this proxy
     const rewritten = decoded
       .split("\n")
       .map((line) => {
@@ -1229,13 +1187,9 @@ async function handleProxy(req, res, plugin, payloadPath) {
   }
 }
 
-// ---------- router ----------
-
 const STATIC_FILES = {
   "/": { file: "index.html", type: "text/html; charset=utf-8" },
   "/index.html": { file: "index.html", type: "text/html; charset=utf-8" },
-  "/app.js": { file: "app.js", type: "text/javascript; charset=utf-8" },
-  "/style.css": { file: "style.css", type: "text/css; charset=utf-8" },
 };
 
 function serveStatic(res, entry) {
@@ -1273,8 +1227,6 @@ async function handleRequest(req, res) {
       })),
     });
 
-  // list plugins under any github URL (single file or whole repo) — live,
-  // nothing stored
   if (urlPath === "/api/plugins-from-url") {
     const q = new URL(req.url, "http://x").searchParams;
     const u = q.get("url") || "";
@@ -1289,9 +1241,8 @@ async function handleRequest(req, res) {
     }
   }
 
-  // /plugin/<b64url>/... — plugin identified by its .sky URL in the path
   const b64M = /^\/plugin\/([A-Za-z0-9_-]+)(\/.*)$/.exec(urlPath);
-  // /<slug>/... — plugin from the config
+
   const slugM = /^\/([^/]+)(\/.*)$/.exec(urlPath);
   const key = b64M ? b64M[1] : slugM ? slugM[1] : null;
   const rest = b64M ? b64M[2] : slugM ? slugM[2] : "";
@@ -1306,8 +1257,6 @@ async function handleRequest(req, res) {
     });
 
   if (rest === "/manifest.json") {
-    // first manifest fetch warms the catalogs (slow getHome must not block
-    // the addon being visible — descriptor catalogs are advertised meanwhile)
     const warmed = warmPlugin(plugin).catch(() => {});
     if (plugin.sections.size === 0 && plugin.descriptor.catalogs?.length)
       return sendJson(res, 200, buildManifest(plugin));
@@ -1345,8 +1294,6 @@ async function handleRequest(req, res) {
 
   return sendJson(res, 404, { error: "not found" });
 }
-
-// ---------- boot ----------
 
 function handler(req, res) {
   handleRequest(req, res).catch((e) => {

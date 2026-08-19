@@ -1168,12 +1168,24 @@ async function handleProxy(req, res, plugin, payloadPath) {
   }
 }
 
+const BRIDGE_MANIFEST = {
+  id: "com.rougehez.plugin-host",
+  version: "1.0.0",
+  name: "Plugin Bridge",
+  description: "Stateless host for Skystream plugins",
+  resources: ["catalog", "meta", "stream"],
+  types: ["movie", "series"],
+  catalogs: [],
+};
+
 const STATIC_FILES = {
   "/": { file: "index.html", type: "text/html; charset=utf-8" },
   "/index.html": { file: "index.html", type: "text/html; charset=utf-8" },
+  "/manifest.json": { json: BRIDGE_MANIFEST },
 };
 
 function serveStatic(res, entry) {
+  if (entry.json) return sendJson(res, 200, entry.json);
   const file = path.join(__dirname, "public", entry.file);
   fs.readFile(file, (err, data) => {
     if (err) return sendJson(res, 404, { error: "not found" });

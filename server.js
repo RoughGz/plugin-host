@@ -704,6 +704,7 @@ function makePlugin(entry) {
     sections: new Map(),
     sectionsTs: 0,
     metaCache: new Map(),
+    streamCache: new Map(),
     catalogIndex: new Map(),
     pendingLoads: new Map(),
     warming: null,
@@ -991,8 +992,12 @@ async function handleMeta(req, res, plugin, type, id) {
 }
 
 async function loadStreamsFor(plugin, id) {
+  const cached = plugin.streamCache.get(id);
+  if (cached && Date.now() - cached.ts < CACHE_TTL_MS) return cached.value;
   const r = await callPlugin(plugin, "loadStreams", [id]);
-  return r.success && Array.isArray(r.data) ? r.data : [];
+  const value = r.success && Array.isArray(r.data) ? r.data : [];
+  cachePut(plugin.streamCache, id, Date.now(), value);
+  return value;
 }
 
 async function handleStream(req, res, plugin, type, id, base) {

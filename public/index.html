@@ -120,29 +120,6 @@
         color: var(--muted);
         margin-top: 12px;
         font-size: 15.5px;
-        max-width: 560px;
-        margin-left: auto;
-        margin-right: auto;
-      }
-      .chips {
-        display: flex;
-        gap: 10px;
-        justify-content: center;
-        margin-top: 22px;
-        flex-wrap: wrap;
-      }
-      .chip {
-        background: var(--panel);
-        border: 1px solid var(--border);
-        border-radius: 999px;
-        padding: 7px 15px;
-        font-size: 12.5px;
-        color: var(--muted);
-        font-family: var(--mono);
-      }
-      .chip b {
-        color: var(--accent2);
-        font-weight: 600;
       }
       .card {
         background: var(--panel);
@@ -219,29 +196,18 @@
         font-size: 12.5px;
         border-radius: 9px;
       }
-      .btn.danger {
-        background: transparent;
-        border: 1px solid rgba(248, 113, 113, 0.4);
-        color: var(--red);
+      .hint {
+        font-size: 13px;
+        color: var(--muted);
+        margin-top: 10px;
       }
-      .btn.green {
-        background: linear-gradient(135deg, #059669, #34d399);
-        color: #06281c;
-      }
-      .toolbar {
-        display: flex;
-        align-items: center;
-        gap: 10px;
-        flex-wrap: wrap;
-        margin-bottom: 16px;
-      }
-      .toolbar .count {
+      .count {
         color: var(--muted);
         font-size: 13px;
         font-family: var(--mono);
-        margin-right: auto;
+        margin-bottom: 14px;
       }
-      .toolbar .count b {
+      .count b {
         color: var(--text);
       }
       .row {
@@ -253,22 +219,10 @@
         border-radius: 12px;
         padding: 14px 16px;
         margin-bottom: 10px;
-        transition:
-          border-color 0.15s,
-          opacity 0.15s;
+        transition: border-color 0.15s;
       }
       .row:hover {
         border-color: #33415e;
-      }
-      .row.off {
-        opacity: 0.45;
-      }
-      .row input[type="checkbox"] {
-        width: 17px;
-        height: 17px;
-        accent-color: var(--accent);
-        cursor: pointer;
-        flex: none;
       }
       .row .meta {
         flex: 1;
@@ -277,32 +231,6 @@
       .row .name {
         font-weight: 600;
         font-size: 14.5px;
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        flex-wrap: wrap;
-      }
-      .badge {
-        font-family: var(--mono);
-        font-size: 10.5px;
-        padding: 2px 8px;
-        border-radius: 6px;
-        letter-spacing: 0.03em;
-      }
-      .badge.sky {
-        background: rgba(34, 211, 238, 0.12);
-        color: var(--accent2);
-        border: 1px solid rgba(34, 211, 238, 0.3);
-      }
-      .badge.js {
-        background: rgba(251, 191, 36, 0.12);
-        color: var(--amber);
-        border: 1px solid rgba(251, 191, 36, 0.3);
-      }
-      .badge.repo {
-        background: rgba(52, 211, 153, 0.12);
-        color: var(--green);
-        border: 1px solid rgba(52, 211, 153, 0.3);
       }
       .row .url {
         color: var(--muted);
@@ -325,90 +253,11 @@
         flex-wrap: wrap;
         flex: none;
       }
-      .toggle {
-        width: 40px;
-        height: 22px;
-        border-radius: 999px;
-        background: #2a3247;
-        border: none;
-        cursor: pointer;
-        position: relative;
-        flex: none;
-        transition: background 0.15s;
-      }
-      .toggle::after {
-        content: "";
-        position: absolute;
-        top: 3px;
-        left: 3px;
-        width: 16px;
-        height: 16px;
-        border-radius: 50%;
-        background: #8b94a7;
-        transition:
-          transform 0.15s,
-          background 0.15s;
-      }
-      .toggle.on {
-        background: var(--accent);
-      }
-      .toggle.on::after {
-        transform: translateX(18px);
-        background: #fff;
-      }
       .empty {
         color: var(--muted);
         text-align: center;
         padding: 26px 0;
         font-size: 14px;
-      }
-      .results {
-        margin-top: 26px;
-      }
-      .results .head {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 10px;
-        margin-bottom: 14px;
-        flex-wrap: wrap;
-      }
-      .results .head h2 {
-        font-size: 17px;
-        font-weight: 700;
-      }
-      .result {
-        background: var(--panel2);
-        border: 1px solid var(--border);
-        border-radius: 12px;
-        padding: 14px 16px;
-        margin-bottom: 10px;
-      }
-      .result .r-top {
-        display: flex;
-        align-items: center;
-        gap: 10px;
-        flex-wrap: wrap;
-      }
-      .result .r-name {
-        font-weight: 600;
-        font-size: 14px;
-      }
-      .result .r-url {
-        font-family: var(--mono);
-        font-size: 12px;
-        color: var(--accent2);
-        word-break: break-all;
-        margin: 6px 0 10px;
-      }
-      .result .r-actions {
-        display: flex;
-        gap: 8px;
-        flex-wrap: wrap;
-      }
-      .hint {
-        font-size: 13px;
-        color: var(--muted);
       }
       .spinner {
         width: 16px;
@@ -523,10 +372,6 @@
       <section class="hero">
         <h1>One link. <span>Every plugin.</span></h1>
         <p>Paste any plugin link. Get addon URLs.</p>
-        <div class="chips" id="chips">
-          <span class="chip"><b>0</b> plugins loaded</span>
-          <span class="chip"><b>0</b> enabled</span>
-        </div>
       </section>
 
       <section class="card">
@@ -541,35 +386,15 @@
           />
           <button class="btn" id="load">Load plugins</button>
         </div>
-        <div class="hint" style="margin-top: 10px">
+        <div class="hint">
           Plugin file, GitHub folder, whole repo, or repo.json — one box for
           everything.
         </div>
       </section>
 
       <section id="listSection" style="display: none">
-        <div class="toolbar">
-          <span class="count" id="listCount"></span>
-          <button class="btn ghost" id="enableAll">Enable all</button>
-          <button class="btn ghost" id="disableAll">Disable all</button>
-          <button class="btn ghost danger" id="resetBtn">Reset</button>
-          <button class="btn green small" id="generate">
-            Generate addon URLs
-          </button>
-        </div>
+        <div class="count" id="listCount"></div>
         <div id="list"></div>
-      </section>
-
-      <section class="results" id="resultsSection" style="display: none">
-        <div class="head">
-          <h2>Your addon URLs</h2>
-          <button class="btn ghost small" id="copyAll">Copy all</button>
-        </div>
-        <div id="results"></div>
-        <p class="hint" style="margin-top: 14px">
-          Install one by one in Stremio, or copy each URL and add it manually in
-          Stremio &rarr; Addons.
-        </p>
       </section>
 
       <section class="card" style="margin-top: 34px">
@@ -585,22 +410,26 @@
           </div>
           <div class="step">
             <div class="n">2</div>
-            <h3>Pick your plugins</h3>
+            <h3>Pick a plugin</h3>
             <p>
-              Enable or disable each plugin, check the ones you want, then
-              generate addon URLs for the selection.
+              Every plugin in the link appears below with its own Install in
+              Stremio and Copy buttons.
             </p>
           </div>
           <div class="step">
             <div class="n">3</div>
             <h3>Install in Stremio</h3>
             <p>
-              Hit Install in Stremio for each URL — or copy the URLs and add
-              them manually. No accounts, no storage.
+              Hit Install in Stremio for each plugin — or copy the URL and add
+              it manually. No accounts, no storage.
             </p>
             <a
               class="btn ghost small"
-              style="display: inline-block; margin-top: 12px; text-decoration: none"
+              style="
+                display: inline-block;
+                margin-top: 12px;
+                text-decoration: none;
+              "
               href="https://github.com/akashdh11/skystream-tools/blob/main/DEVELOPER.md"
               target="_blank"
               rel="noopener"
@@ -617,11 +446,7 @@
     <div id="toast" role="status"></div>
     <script>
       const $ = (id) => document.getElementById(id);
-      const state = {
-        url: "",
-        plugins: [],
-        enabled: new Set(),
-      };
+      const state = { url: "", plugins: [] };
       const b64u = (s) =>
         btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
       const addonUrl = (u) =>
@@ -660,22 +485,6 @@
         a.remove();
       }
 
-      function badgeFor(u) {
-        if (/.json$/i.test(u)) return '<span class="badge repo">repo</span>';
-        if (/\.sky$/i.test(u)) return '<span class="badge sky">.sky</span>';
-        return '<span class="badge js">plugin.js</span>';
-      }
-
-      function updateChips() {
-        $("chips").innerHTML =
-          '<span class="chip"><b>' +
-          state.plugins.length +
-          "</b> plugins loaded</span>" +
-          '<span class="chip"><b>' +
-          state.enabled.size +
-          "</b> enabled</span>";
-      }
-
       function render() {
         const list = $("list");
         if (!state.plugins.length) {
@@ -684,96 +493,44 @@
           return;
         }
         list.innerHTML = state.plugins
-          .map((p, i) => {
-            const on = state.enabled.has(i);
-            const desc = p.description
-              ? '<div class="desc">' +
-                p.description.replace(/</g, "&lt;") +
-                "</div>"
-              : "";
-            return (
-              '<div class="row' +
-              (on ? "" : " off") +
-              '">' +
+          .map(
+            (p, i) =>
+              '<div class="row">' +
               '<div class="meta">' +
               '<div class="name">' +
               p.name.replace(/</g, "&lt;") +
-              badgeFor(p.url) +
               "</div>" +
               '<div class="url" title="' +
               p.url.replace(/"/g, "&quot;") +
               '">' +
               p.url.replace(/&/g, "&amp;").replace(/</g, "&lt;") +
               "</div>" +
-              desc +
+              (p.description
+                ? '<div class="desc">' +
+                  p.description.replace(/</g, "&lt;") +
+                  "</div>"
+                : "") +
               "</div>" +
-              '<button class="toggle' +
-              (on ? " on" : "") +
-              '" data-t="' +
-              i +
-              '" role="switch" aria-checked="' +
-              on +
-              '" aria-label="Toggle ' +
-              p.name +
-              '"></button>' +
               '<div class="actions">' +
               '<button class="btn ghost small" data-c="' +
               i +
               '">Copy addon URL</button>' +
-              '<button class="btn ghost small" data-i2="' +
+              '<button class="btn small" data-i2="' +
               i +
-              '">Install in Stremio</button>' +
-              "</div>" +
-              "</div>"
-            );
-          })
-          .join("");
-        $("listSection").style.display = "block";
-        $("listCount").innerHTML =
-          "<b>" +
-          state.plugins.length +
-          "</b> plugins from <b>" +
-          state.url.replace(/&/g, "&amp;") +
-          "</b>";
-        updateChips();
-      }
-
-      function generate() {
-        const chosen = state.plugins
-          .map((p, i) => ({ p, i }))
-          .filter((x) => state.enabled.has(x.i));
-        if (!chosen.length) {
-          toast("Enable at least one plugin first", "err");
-          return;
-        }
-        $("results").innerHTML = chosen
-          .map(
-            (x) =>
-              '<div class="result">' +
-              '<div class="r-top">' +
-              badgeFor(x.p.url) +
-              '<span class="r-name">' +
-              x.p.name.replace(/</g, "&lt;") +
-              "</span></div>" +
-              '<div class="r-url">' +
-              addonUrl(x.p.url).replace(/&/g, "&amp;") +
-              "</div>" +
-              '<div class="r-actions">' +
-              '<button class="btn ghost small" data-ra="' +
-              x.i +
-              '">Copy URL</button>' +
-              '<button class="btn small" data-ri="' +
-              x.i +
               '">Install in Stremio</button>' +
               "</div>" +
               "</div>",
           )
           .join("");
-        $("resultsSection").style.display = "block";
-        $("resultsSection").scrollIntoView({
-          behavior: "smooth",
-          block: "start",
-        });
+        $("listSection").style.display = "block";
+        $("listCount").innerHTML =
+          "<b>" +
+          state.plugins.length +
+          " plugin" +
+          (state.plugins.length === 1 ? "" : "s") +
+          " from <b>" +
+          state.url.replace(/&/g, "&amp;") +
+          "</b>";
       }
 
       async function load() {
@@ -789,8 +546,6 @@
           if (!r.ok) throw new Error(data.error || "failed to list plugins");
           state.url = u;
           state.plugins = data.plugins || [];
-          state.enabled = new Set();
-          $("resultsSection").style.display = "none";
           render();
           if (state.plugins.length)
             toast("Found " + state.plugins.length + " plugins");
@@ -804,49 +559,12 @@
         }
       }
 
-      function reset() {
-        state.url = "";
-        state.plugins = [];
-        state.enabled = new Set();
-        $("url").value = "";
-        $("list").innerHTML = "";
-        $("results").innerHTML = "";
-        $("listSection").style.display = "none";
-        $("resultsSection").style.display = "none";
-        updateChips();
-        toast("Reset done", "ok");
-      }
-
       $("load").addEventListener("click", load);
       $("url").addEventListener("keydown", (e) => {
         if (e.key === "Enter") load();
       });
-      $("enableAll").addEventListener("click", () => {
-        state.plugins.forEach((_, i) => state.enabled.add(i));
-        render();
-      });
-      $("disableAll").addEventListener("click", () => {
-        state.enabled.clear();
-        render();
-      });
-      $("resetBtn").addEventListener("click", reset);
-      $("generate").addEventListener("click", generate);
-      $("copyAll").addEventListener("click", () => {
-        const urls = state.plugins
-          .map((p, i) => ({ p, i }))
-          .filter((x) => state.enabled.has(x.i))
-          .map((x) => addonUrl(x.p.url));
-        if (urls.length)
-          copy(urls.join("\n"), "Copied " + urls.length + " URLs");
-        else toast("Enable at least one plugin first", "err");
-      });
       $("list").addEventListener("click", (e) => {
-        if (e.target.dataset.t !== undefined) {
-          const n = Number(e.target.dataset.t);
-          if (state.enabled.has(n)) state.enabled.delete(n);
-          else state.enabled.add(n);
-          render();
-        } else if (e.target.dataset.c !== undefined) {
+        if (e.target.dataset.c !== undefined) {
           copy(
             addonUrl(state.plugins[Number(e.target.dataset.c)].url),
             "Addon URL copied",
@@ -855,21 +573,6 @@
           installStremio(
             addonUrl(state.plugins[Number(e.target.dataset.i2)].url),
           );
-          toast("Opening Stremio\u2026", "ok");
-        }
-      });
-      $("results").addEventListener("click", (e) => {
-        const n =
-          e.target.dataset.ra !== undefined
-            ? Number(e.target.dataset.ra)
-            : e.target.dataset.ri !== undefined
-              ? Number(e.target.dataset.ri)
-              : null;
-        if (n === null) return;
-        const url = addonUrl(state.plugins[n].url);
-        if (e.target.dataset.ra !== undefined) copy(url, "Addon URL copied");
-        else {
-          installStremio(url);
           toast("Opening Stremio\u2026", "ok");
         }
       });

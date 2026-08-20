@@ -20,7 +20,7 @@ const SOURCE_TTL_MS = 60 * 60 * 1000;
 const META_TIMED_OUT = Symbol("meta.timed.out");
 // Clients (Nuvio ~5s, Stremio ~10-15s) drop slow meta requests. Respond fast
 // with the catalog fallback and let the load finish in the background.
-const META_TIMEOUT_MS = 3000;
+const META_TIMEOUT_MS = 4000;
 const STREAM_TIMEOUT_MS = 15000;
 const MANIFEST_TIMEOUT_MS = 10000;
 
@@ -716,6 +716,7 @@ async function loadSource(url) {
 const pluginsByKey = new Map();
 const reqLog = [];
 const metaServed = [];
+const pluginErrors = [];
 function makePlugin(entry) {
   const p = {
     id: entry.id,
@@ -862,8 +863,24 @@ async function getRawItem(plugin, metaId, timeoutMs) {
         new Promise((r) => setTimeout(() => r(META_TIMED_OUT), timeoutMs)),
       ])
     : await load;
-  if (res === META_TIMED_OUT) return null;
+  if (res === META_TIMED_OUT) {
+    pluginErrors.push({
+      t: new Date().toISOString().slice(11, 19),
+      plugin: plugin.name,
+      id: String(metaId).slice(0, 60),
+      error: "timeout after " + timeoutMs + "ms",
+    });
+    if (pluginErrors.length > 100) pluginErrors.shift();
+    return null;
+  }
   if (!res.success || !res.data || typeof res.data !== "object") {
+    pluginErrors.push({
+      t: new Date().toISOString().slice(11, 19),
+      plugin: plugin.name,
+      id: String(metaId).slice(0, 60),
+      error: String(res.message || "invalid data").slice(0, 120),
+    });
+    if (pluginErrors.length > 100) pluginErrors.shift();
     cachePut(plugin.metaCache, metaId, Date.now(), null, NEGATIVE_TTL_MS);
     return null;
   }
@@ -873,7 +890,7 @@ async function getRawItem(plugin, metaId, timeoutMs) {
 // Prefetch meta for the first items of a catalog so the user's first click
 // (Nuvio caps meta fetches at 5s; moviblast's API takes ~6s) hits the cache
 // and returns the FULL meta instantly instead of the 3s fallback.
-const PREFETCH_LIMIT = 8;
+const PREFETCH_LIMIT = 20;
 const PREFETCH_CONCURRENCY = 3;
 function prefetchMeta(plugin, items) {
   if (!plugin.ctx || plugin.prefetching) return;
@@ -906,6 +923,56 @@ function prefetchMeta(plugin, items) {
   ).finally(() => {
     plugin.prefetching = false;
   });
+}
+
+function humanizeId(id) {
+  // Turn a URL or token into a readable title: decode, strip scheme/host,
+  // split on separators, drop noise words, capitalize words.
+  let s = String(id || "");
+  try {
+    s = decodeURIComponent(s);
+  } catch (e) {}
+  s = s.replace(/^https?:\/\//i, "").replace(/^www\./i, "");
+  s = s.split("/").filter(Boolean).pop() || s;
+  s = s.replace(/\.(html?|php|json)$/i, "");
+  s = s
+    .replace(/[-_+]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const noise = new Set([
+    "download",
+    "watch",
+    "full",
+    "movie",
+    "series",
+    "episode",
+    "ep",
+    "hd",
+    "480p",
+    "720p",
+    "1080p",
+    "web",
+    "dl",
+    "hindi",
+    "tamil",
+    "telugu",
+    "dubbed",
+    "online",
+    "free",
+    "stream",
+    "s01",
+    "s02",
+    "s03",
+    "s04",
+    "season",
+    "show",
+  ]);
+  const words = s.split(" ").filter((w) => w && !noise.has(w.toLowerCase()));
+  const kept = words.length ? words : s.split(" ");
+  return kept
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ")
+    .slice(0, 80);
 }
 
 function fallbackItem(item, id) {
@@ -1067,12 +1134,11 @@ async function handleMeta(req, res, plugin, type, id) {
     item = catalogItemFor(plugin, id);
     servedFrom = "catalog-item";
     if (!item) {
-      const last = id.split("/").filter(Boolean).pop();
       item = {
         id,
         url: id,
         type,
-        name: last || id,
+        name: humanizeId(id),
         ...(type === "movie" ? { episodes: [{ name: "Play", url: id }] } : {}),
       };
       servedFrom = "synthetic";
@@ -1430,7 +1496,7 @@ function handler(req, res) {
   };
   res.on("finish", () => done(res.statusCode));
   if (req.url === "/debug") {
-    return sendJson(res, 200, { requests: reqLog.slice(-100), metaServed });
+    return sendJson(res, 200, { requests: reqLog.slice(-100), metaServed, pluginErrors });
   }
   if (req.url === "/test") {
     // Human-readable connectivity check for non-technical users.

@@ -715,6 +715,7 @@ async function loadSource(url) {
 
 const pluginsByKey = new Map();
 const reqLog = [];
+const metaServed = [];
 function makePlugin(entry) {
   const p = {
     id: entry.id,
@@ -1061,8 +1062,10 @@ async function handleMeta(req, res, plugin, type, id) {
   // running in the background and populates the cache, so the next request
   // gets the full meta.
   let item = await getRawItem(plugin, id, META_TIMEOUT_MS);
+  let servedFrom = "upstream";
   if (!item) {
     item = catalogItemFor(plugin, id);
+    servedFrom = "catalog-item";
     if (!item) {
       const last = id.split("/").filter(Boolean).pop();
       item = {
@@ -1072,9 +1075,24 @@ async function handleMeta(req, res, plugin, type, id) {
         name: last || id,
         ...(type === "movie" ? { episodes: [{ name: "Play", url: id }] } : {}),
       };
+      servedFrom = "synthetic";
     }
   }
-  sendJson(res, 200, { meta: mapMeta(item) });
+  const cached = plugin.metaCache.get(id);
+  if (cached && cached.value && !servedFrom.startsWith("synthetic")) {
+    servedFrom = cached.value.name ? "cache-full" : "cache";
+  }
+  const body = { meta: mapMeta(item) };
+  metaServed.push({
+    t: new Date().toISOString().slice(11, 19),
+    id: String(id).slice(0, 60),
+    type,
+    servedFrom,
+    name: item.name || "",
+    len: JSON.stringify(body).length,
+  });
+  if (metaServed.length > 50) metaServed.shift();
+  sendJson(res, 200, body);
 }
 
 async function loadStreamsFor(plugin, id, timeoutMs) {
@@ -1412,7 +1430,7 @@ function handler(req, res) {
   };
   res.on("finish", () => done(res.statusCode));
   if (req.url === "/debug") {
-    return sendJson(res, 200, { requests: reqLog.slice(-100) });
+    return sendJson(res, 200, { requests: reqLog.slice(-100), metaServed });
   }
   if (req.url === "/test") {
     // Human-readable connectivity check for non-technical users.

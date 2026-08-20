@@ -80,22 +80,26 @@ button). The workflow:
 2. 🚀 pushes the repo to dokku (`HEAD:master --force`)
 3. ✅ waits for healthchecks and prints the app URL
 
-## 3. Auto-deploy on every edit
+## 3. Deploying
 
-Already wired up — `.github/workflows/deploy.yml` triggers on:
+The workflow triggers **only manually** — it does not run on every commit:
 
 ```yaml
 on:
-  push:
-    branches: [main]
   workflow_dispatch: # manual "Deploy now" button
 ```
 
-So the workflow is: **edit code → `git add . && git commit -m "..." && git push`
-→ deployed in ~2 minutes.** Nothing else to do.
+To deploy: open **Actions → Deploy to BeamUp → Run workflow**. The workflow:
 
-Rapid consecutive pushes cancel the previous run (`concurrency`), so you never
-get a queue of stale deploys.
+1. 🔑 normalizes the SSH key (fixes pasted-key corruption) and verifies it
+2. 🚀 pushes the repo to dokku (`HEAD:master --force`)
+3. ✅ waits for healthchecks and prints the app URL
+
+> Want auto-deploy on every push instead? Add `push: { branches: [main] }` back
+> to the `on:` block — the rest of the workflow already handles it.
+
+For a general guide on hosting any project on BeamUp (CLI, direct git push, env
+vars, logs, troubleshooting), see **[Beamupguide.md](Beamupguide.md)**.
 
 ## 4. Manual deploy options
 

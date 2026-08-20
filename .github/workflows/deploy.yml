@@ -1,8 +1,6 @@
 name: Deploy to BeamUp
 on:
-  push:
-    branches: [main]
-  workflow_dispatch: # manual "Deploy now" button
+  workflow_dispatch: # manual "Deploy now" button only
 
 concurrency:
   group: beamup-deploy

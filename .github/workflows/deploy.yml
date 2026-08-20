@@ -9,6 +9,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # dokku rejects shallow pushes
       - name: Setup SSH key
         env:
           SSH_KEY: ${{ secrets.BEAMUP_SSH_KEY }}

@@ -714,6 +714,7 @@ async function loadSource(url) {
 }
 
 const pluginsByKey = new Map();
+const reqLog = [];
 function makePlugin(entry) {
   const p = {
     id: entry.id,
@@ -1394,6 +1395,44 @@ async function handleRequest(req, res) {
 }
 
 function handler(req, res) {
+  const t0 = Date.now();
+  const done = (status) => {
+    const entry = {
+      t: new Date().toISOString().slice(11, 19),
+      ip: (req.headers["x-forwarded-for"] || req.socket.remoteAddress || "")
+        .split(",")[0]
+        .trim(),
+      ua: (req.headers["user-agent"] || "").slice(0, 60),
+      path: (req.url || "").slice(0, 160),
+      status,
+      ms: Date.now() - t0,
+    };
+    reqLog.push(entry);
+    if (reqLog.length > 200) reqLog.shift();
+  };
+  res.on("finish", () => done(res.statusCode));
+  if (req.url === "/debug") {
+    return sendJson(res, 200, { requests: reqLog.slice(-100) });
+  }
+  if (req.url === "/test") {
+    // Human-readable connectivity check for non-technical users.
+    const key =
+      "aHR0cHM6Ly9yYXcuZ2l0aHVidXNlcmNvbnRlbnQuY29tL1JvdWdoZUh6L3BsdWdpbnNmb3Jza3kvbWFpbi9kaXN0L2NvbS5jb29raWUubW92aWJsYXN0LnNreQ";
+    const plugin = pluginForKey(key);
+    if (!plugin) return sendJson(res, 500, { error: "plugin not found" });
+    ensureRuntime(plugin).then(async () => {
+      const id = "https://app.cloud-mb.xyz/api/media/detail/986/jdvhhjv255vghh";
+      const item = await getRawItem(plugin, id, 15000);
+      const name = item && (item.name || item.title);
+      sendJson(res, 200, {
+        ok: !!name,
+        message: name
+          ? "SERVER OK - meta loaded: " + name
+          : "SERVER ERROR - meta load failed",
+      });
+    });
+    return;
+  }
   if (req.url === "/health") {
     const mem = process.memoryUsage();
     return sendJson(res, 200, {

@@ -84,6 +84,9 @@
         font-size: 12.5px;
         color: var(--muted);
         font-family: var(--mono);
+        padding: 4px 10px;
+        border-radius: 6px;
+        background: rgba(255, 255, 255, 0.06);
       }
       .status .dot {
         width: 8px;
@@ -91,9 +94,23 @@
         border-radius: 50%;
         background: var(--muted);
       }
-      .status.online .dot {
+      .status.online {
         background: var(--green);
-        box-shadow: 0 0 8px var(--green);
+        color: #062b12;
+        font-weight: 600;
+      }
+      .status.online .dot {
+        background: #062b12;
+        box-shadow: none;
+      }
+      .version {
+        font-family: var(--mono);
+        font-size: 12.5px;
+        font-weight: 600;
+        padding: 4px 10px;
+        border-radius: 6px;
+        background: var(--red);
+        color: #fff;
       }
       main {
         max-width: 960px;
@@ -366,6 +383,7 @@
         <div class="status" id="status">
           <span class="dot"></span><span id="statusText">checking</span>
         </div>
+        <div class="version">v1.0</div>
       </div>
     </header>
     <main>

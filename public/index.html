@@ -80,37 +80,37 @@
       .status {
         display: flex;
         align-items: center;
-        gap: 7px;
-        font-size: 12.5px;
+        gap: 5px;
+        font-size: 11px;
         color: var(--muted);
         font-family: var(--mono);
-        padding: 4px 10px;
-        border-radius: 6px;
+        padding: 2px 7px;
+        border-radius: 5px;
         background: rgba(255, 255, 255, 0.06);
       }
       .status .dot {
-        width: 8px;
-        height: 8px;
+        width: 6px;
+        height: 6px;
         border-radius: 50%;
         background: var(--muted);
       }
       .status.online {
-        background: var(--green);
-        color: #062b12;
+        background: rgba(52, 211, 153, 0.16);
+        color: var(--green);
         font-weight: 600;
       }
       .status.online .dot {
-        background: #062b12;
+        background: var(--green);
         box-shadow: none;
       }
       .version {
         font-family: var(--mono);
-        font-size: 12.5px;
+        font-size: 11px;
         font-weight: 600;
-        padding: 4px 10px;
-        border-radius: 6px;
-        background: var(--red);
-        color: #fff;
+        padding: 2px 7px;
+        border-radius: 5px;
+        background: rgba(248, 113, 113, 0.16);
+        color: var(--red);
       }
       main {
         max-width: 960px;
@@ -380,10 +380,12 @@
           <div class="logo">&#9889;</div>
           Plugin Bridge
         </div>
-        <div class="status" id="status">
-          <span class="dot"></span><span id="statusText">checking</span>
+        <div style="display: flex; align-items: center; gap: 6px">
+          <div class="status" id="status">
+            <span class="dot"></span><span id="statusText">checking</span>
+          </div>
+          <div class="version">v1.0</div>
         </div>
-        <div class="version">v1.0</div>
       </div>
     </header>
     <main>

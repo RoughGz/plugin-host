@@ -1241,9 +1241,9 @@ function serveStatic(res, entry) {
       "Content-Type": entry.type,
       "Content-Length": data.length,
       "Access-Control-Allow-Origin": "*",
-      // BeamUp's nginx caches aggressively (4h); the dashboard must not be
-      // stale after a deploy.
-      "Cache-Control": "no-cache",
+      // BeamUp's edge caches HTML for 4h (overriding no-cache); no-store is
+      // respected (like the API routes) so the dashboard is always fresh.
+      "Cache-Control": "no-store",
     });
     res.end(data);
   });

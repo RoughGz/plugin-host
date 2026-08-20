@@ -298,6 +298,21 @@ async function httpRequest(method, url, headers, body) {
       !h["content-type"]
     )
       h["Content-Type"] = "application/x-www-form-urlencoded";
+    // Serialize object bodies to JSON — plugins pass {json:true} or plain
+    // objects expecting them to be stringified.
+    if (body && typeof body === "object" && !(body instanceof FormData)) {
+      if (body.json === true) {
+        body = JSON.stringify(body.json === true ? {} : body);
+        h["Content-Type"] = "application/json";
+      } else if (body.json !== undefined) {
+        body = JSON.stringify(body.json);
+        h["Content-Type"] = "application/json";
+      } else {
+        body = JSON.stringify(body);
+        if (!h["Content-Type"] && !h["content-type"])
+          h["Content-Type"] = "application/json";
+      }
+    }
     let cur = url;
     let finalUrl = url;
     for (let hop = 0; hop < 5; hop++) {
@@ -418,6 +433,10 @@ function http_get(url, headers, cb) {
   });
 }
 function http_post(url, headers, body, cb) {
+  // Skystream plugins use three calling conventions:
+  //   http_post(url, headers, body)          — standard
+  //   http_post(url, body, headers)          — CineFreak-style (body is a string, headers an object)
+  //   http_post(url, { headers, body })      — compiled Dart wrapper
   if (
     headers &&
     typeof headers === "object" &&
@@ -426,6 +445,15 @@ function http_post(url, headers, body, cb) {
   ) {
     body = headers.body;
     headers = headers.headers;
+  } else if (
+    typeof headers === "string" &&
+    body &&
+    typeof body === "object" &&
+    !Array.isArray(body)
+  ) {
+    const tmp = headers;
+    headers = body;
+    body = tmp;
   }
   return httpRequest("POST", url, headers, body).then((res) => {
     if (typeof cb === "function") cb(res);
@@ -630,7 +658,16 @@ function buildContext(code, descriptor) {
     http_post,
     http_parallel,
     crypto: webcrypto,
-    getAndUnpack: (js) => unpackJs(String(js)),
+    getAndUnpack: (js) => {
+      // CloudStream's getAndUnpack(url) fetches a URL then unpacks; the host's
+      // unpackJs takes a JS string. Accept both: if given a URL, fetch it first.
+      const s = String(js);
+      if (/^https?:\/\//i.test(s))
+        return httpRequest("GET", s, {}, null).then((res) =>
+          unpackJs(String(res.body || "")),
+        );
+      return unpackJs(s);
+    },
     parseHtml: (html) => Promise.resolve(parseHtml(html)),
     parse_html: (html, selector, attr) =>
       Promise.resolve(parse_html(html, selector, attr)),
@@ -655,9 +692,16 @@ function invoke(ctx, fn, args) {
     const finish = (ok, value, error) => {
       if (!settled) {
         settled = true;
+        clearTimeout(timer);
         resolve({ ok, value, error });
       }
     };
+    // Guard against plugins that return synchronously without calling the
+    // callback: resolve with an error after 30s so callers never hang.
+    const timer = setTimeout(
+      () => finish(false, undefined, "plugin call timed out"),
+      30000,
+    );
     try {
       const result = fn(...args, (v) =>
         finish(true, v === undefined ? "__dart_void__" : v),
@@ -1496,7 +1540,11 @@ function handler(req, res) {
   };
   res.on("finish", () => done(res.statusCode));
   if (req.url === "/debug") {
-    return sendJson(res, 200, { requests: reqLog.slice(-100), metaServed, pluginErrors });
+    return sendJson(res, 200, {
+      requests: reqLog.slice(-100),
+      metaServed,
+      pluginErrors,
+    });
   }
   if (req.url === "/test") {
     // Human-readable connectivity check for non-technical users.

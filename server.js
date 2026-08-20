@@ -919,7 +919,8 @@ async function getRawItem(plugin, metaId, timeoutMs) {
   // (Nuvio: 5s) must not be exceeded.
   if (
     res !== META_TIMED_OUT &&
-    (!res.success || !res.data || typeof res.data !== "object")
+    (!res.success || !res.data || typeof res.data !== "object") &&
+    Date.now() - started < timeoutMs * 0.4
   ) {
     const retry = callPlugin(plugin, "load", [metaId]);
     plugin.pendingLoads.set(metaId, retry);
@@ -972,7 +973,7 @@ async function getRawItem(plugin, metaId, timeoutMs) {
 // (Nuvio caps meta fetches at 5s; moviblast's API takes ~6s) hits the cache
 // and returns the FULL meta instantly instead of the 3s fallback.
 const PREFETCH_LIMIT = 20;
-const PREFETCH_CONCURRENCY = 3;
+const PREFETCH_CONCURRENCY = 6;
 function prefetchMeta(plugin, items) {
   if (!plugin.ctx || plugin.prefetching) return;
   const queue = items
@@ -1061,9 +1062,10 @@ function fallbackItem(item, id) {
   return {
     ...item,
     url: item.url || item.id || id,
-    // Only movies get a synthetic Play episode; series keep their type so
-    // clients don't request /stream/movie/ for a series id.
-    ...(type === "movie" ? { episodes: [{ name: "Play", url: id }] } : {}),
+    // Movies get a synthetic Play episode; series get one too so the user can
+    // always tap to play — the background load() fills in the real episode
+    // list for the next open.
+    episodes: [{ name: "Play", url: id }],
   };
 }
 

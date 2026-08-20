@@ -20,7 +20,7 @@ const SOURCE_TTL_MS = 60 * 60 * 1000;
 const META_TIMED_OUT = Symbol("meta.timed.out");
 // Clients (Nuvio ~5s, Stremio ~10-15s) drop slow meta requests. Respond fast
 // with the catalog fallback and let the load finish in the background.
-const META_TIMEOUT_MS = 4000;
+const META_TIMEOUT_MS = 3000;
 const STREAM_TIMEOUT_MS = 15000;
 const MANIFEST_TIMEOUT_MS = 10000;
 
@@ -868,6 +868,44 @@ async function getRawItem(plugin, metaId, timeoutMs) {
   return res.data;
 }
 
+// Prefetch meta for the first items of a catalog so the user's first click
+// (Nuvio caps meta fetches at 5s; moviblast's API takes ~6s) hits the cache
+// and returns the FULL meta instantly instead of the 3s fallback.
+const PREFETCH_LIMIT = 8;
+const PREFETCH_CONCURRENCY = 3;
+function prefetchMeta(plugin, items) {
+  if (!plugin.ctx || plugin.prefetching) return;
+  const queue = items
+    .map((it) => it.url || it.id)
+    .filter((id) => id && !plugin.metaCache.has(id))
+    .slice(0, PREFETCH_LIMIT);
+  if (!queue.length) return;
+  plugin.prefetching = true;
+  let i = 0;
+  const worker = async () => {
+    while (i < queue.length) {
+      const id = queue[i++];
+      try {
+        const res = await callPlugin(plugin, "load", [id]);
+        if (res.success && res.data && typeof res.data === "object") {
+          if (!res.data.url) res.data.url = id;
+          cachePut(plugin.metaCache, id, Date.now(), res.data);
+        }
+      } catch (e) {
+        // prefetch is best-effort; a failure just means the fallback serves
+      }
+    }
+  };
+  Promise.all(
+    Array.from(
+      { length: Math.min(PREFETCH_CONCURRENCY, queue.length) },
+      worker,
+    ),
+  ).finally(() => {
+    plugin.prefetching = false;
+  });
+}
+
 function fallbackItem(item, id) {
   const type = mapType(item.type);
   return {
@@ -944,8 +982,23 @@ function findSection(plugin, catalogId) {
   return null;
 }
 
-async function handleCatalog(req, res, plugin, type, catalogId, base) {
+async function handleCatalog(
+  req,
+  res,
+  plugin,
+  type,
+  catalogId,
+  base,
+  extraPath,
+) {
   const q = new URLSearchParams((req.url || "").split("?")[1] || "");
+  // Nuvio puts extras in the path (…/skip=20.json), Stremio in the query.
+  if (extraPath) {
+    for (const part of extraPath.split("&")) {
+      const [k, v] = part.split("=");
+      if (k && !q.has(k)) q.set(k, decodeURIComponent(v || ""));
+    }
+  }
   const search = (q.get("search") || "").trim();
   const skip = Math.max(0, Number(q.get("skip")) || 0);
   const genre = (q.get("genre") || "").trim();
@@ -993,6 +1046,7 @@ async function handleCatalog(req, res, plugin, type, catalogId, base) {
   }
   for (const it of items) plugin.catalogIndex.set(it.url || it.id, it);
   if (plugin.catalogIndex.size > 20000) plugin.catalogIndex.clear();
+  prefetchMeta(plugin, items);
   sendJson(res, 200, {
     metas: items
       .map((it) => mapItem(it, found && found.slug))
@@ -1317,7 +1371,11 @@ async function handleRequest(req, res) {
       base,
     );
 
-  const catalogM = /^\/catalog\/(movie|series)\/(.+)\.json$/.exec(rest);
+  // Nuvio sends catalog extras as a path segment (/catalog/movie/X/skip=20.json),
+  // Stremio as query params; both must work.
+  const catalogM = /^\/catalog\/(movie|series)\/([^/]+)(?:\/(.+))?\.json$/.exec(
+    rest,
+  );
   if (catalogM)
     return handleCatalog(
       req,
@@ -1326,6 +1384,7 @@ async function handleRequest(req, res) {
       catalogM[1],
       decodeId(catalogM[2]),
       base,
+      catalogM[3] ? decodeId(catalogM[3]) : "",
     );
 
   const proxyM = /^\/proxy\/(.+)$/.exec(rest);

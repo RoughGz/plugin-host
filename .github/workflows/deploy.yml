@@ -35,7 +35,7 @@ jobs:
           ssh-keyscan a.baby-beamup.club >> ~/.ssh/known_hosts 2>/dev/null || true
       - name: Deploy
         run: |
-          REMOTE="dokku@a.baby-beamup.club:${{ vars.BEAMUP_APP_ID }}/${{ vars.BEAMUP_PROJECT_NAME }}"
+          REMOTE="dokku@a.baby-beamup.club:${{ secrets.BEAMUP_APP_ID }}/${{ secrets.BEAMUP_PROJECT_NAME }}"
           git remote remove beamup 2>/dev/null || true
           git remote add beamup "$REMOTE"
           GIT_SSH_COMMAND="ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes" \
@@ -43,5 +43,5 @@ jobs:
       - name: Verify
         run: |
           sleep 30
-          curl -sf "https://${{ vars.BEAMUP_APP_ID }}-${{ vars.BEAMUP_PROJECT_NAME }}.baby-beamup.club/" \
+          curl -sf "https://${{ secrets.BEAMUP_APP_ID }}-${{ secrets.BEAMUP_PROJECT_NAME }}.baby-beamup.club/" \
             && echo "Deployed OK" || echo "Warning: may still be starting up"

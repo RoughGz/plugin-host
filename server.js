@@ -1421,7 +1421,7 @@ function handler(req, res) {
         .split(",")[0]
         .trim(),
       ua: (req.headers["user-agent"] || "").slice(0, 60),
-      path: (req.url || "").slice(0, 160),
+      path: (req.url || "").slice(0, 500),
       status,
       ms: Date.now() - t0,
     };

@@ -883,6 +883,7 @@ function cachePut(map, key, ts, value, ttl) {
 
 async function getRawItem(plugin, metaId, timeoutMs) {
   if (!plugin.ctx) return null;
+  const started = Date.now();
   const cached = plugin.metaCache.get(metaId);
   const ttl = cached && cached.ttl ? cached.ttl : CACHE_TTL_MS;
   if (cached && Date.now() - cached.ts < ttl) return cached.value;
@@ -901,12 +902,43 @@ async function getRawItem(plugin, metaId, timeoutMs) {
       .catch(() => {})
       .finally(() => plugin.pendingLoads.delete(metaId));
   }
-  const res = timeoutMs
+  let res = timeoutMs
     ? await Promise.race([
         load,
         new Promise((r) => setTimeout(() => r(META_TIMED_OUT), timeoutMs)),
       ])
     : await load;
+  // Retry once on failure (not timeout): scraper sites are flaky and often
+  // return an HTML error page on the first hit, then succeed on retry.
+  // Only retry if the first attempt failed fast — the client's total budget
+  // (Nuvio: 5s) must not be exceeded.
+  if (
+    res !== META_TIMED_OUT &&
+    (!res.success || !res.data || typeof res.data !== "object")
+  ) {
+    const retry = callPlugin(plugin, "load", [metaId]);
+    plugin.pendingLoads.set(metaId, retry);
+    retry
+      .then((r2) => {
+        if (!r2 || !r2.success || !r2.data || typeof r2.data !== "object")
+          return;
+        if (!r2.data.url) r2.data.url = metaId;
+        cachePut(plugin.metaCache, metaId, Date.now(), r2.data);
+      })
+      .catch(() => {})
+      .finally(() => plugin.pendingLoads.delete(metaId));
+    res = timeoutMs
+      ? await Promise.race([
+          retry,
+          new Promise((r) =>
+            setTimeout(
+              () => r(META_TIMED_OUT),
+              Math.max(0, timeoutMs - (Date.now() - started)),
+            ),
+          ),
+        ])
+      : await retry;
+  }
   if (res === META_TIMED_OUT) {
     pluginErrors.push({
       t: new Date().toISOString().slice(11, 19),
@@ -1030,12 +1062,32 @@ function fallbackItem(item, id) {
   };
 }
 
+function normId(id) {
+  return String(id || "")
+    .replace(/\/+$/, "")
+    .toLowerCase();
+}
+
 function catalogItemFor(plugin, id) {
+  const nid = normId(id);
   for (const section of plugin.sections.values())
     for (const item of section.items)
-      if (item.url === id || item.id === id) return fallbackItem(item, id);
-  const item = plugin.catalogIndex.get(id);
-  if (item) return fallbackItem(item, id);
+      if (normId(item.url) === nid || normId(item.id) === nid)
+        return fallbackItem(item, id);
+  const exact = plugin.catalogIndex.get(id);
+  if (exact) return fallbackItem(exact, id);
+  // Fuzzy: match by normalized id, then by last path segment (covers
+  // trailing-slash / encoding differences between home and catalog items).
+  for (const [key, item] of plugin.catalogIndex) {
+    if (normId(key) === nid) return fallbackItem(item, id);
+  }
+  const last = nid.split("/").filter(Boolean).pop();
+  if (last) {
+    for (const [key, item] of plugin.catalogIndex) {
+      if (normId(key).split("/").filter(Boolean).pop() === last)
+        return fallbackItem(item, id);
+    }
+  }
   return null;
 }
 

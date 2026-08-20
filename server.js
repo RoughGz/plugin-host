@@ -109,7 +109,7 @@ function httpsImg(s) {
   return s ? String(s).replace(/^http:\/\//i, "https://") : s;
 }
 function itemPoster(item) {
-  return httpsImg(item.posterUrl || item.logoUrl) || undefined;
+  return httpsImg(item.posterUrl || item.poster || item.logoUrl) || undefined;
 }
 
 function mapItem(item, sectionSlug) {
@@ -218,7 +218,12 @@ function mapMeta(item) {
     type,
     name: itemName(item),
     poster: itemPoster(item),
-    background: item.bannerUrl || item.backgroundPosterUrl || "",
+    background:
+      item.bannerUrl ||
+      item.backgroundPosterUrl ||
+      item.background ||
+      itemPoster(item) ||
+      "",
     logo: item.logoUrl || "",
     description: item.description || "",
     releaseInfo: item.year ? String(item.year) : "",

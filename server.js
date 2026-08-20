@@ -18,6 +18,11 @@ const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const NEGATIVE_TTL_MS = 60 * 1000;
 const SOURCE_TTL_MS = 60 * 60 * 1000;
 const META_TIMED_OUT = Symbol("meta.timed.out");
+// Clients (Nuvio ~5s, Stremio ~10-15s) drop slow meta requests. Respond fast
+// with the catalog fallback and let the load finish in the background.
+const META_TIMEOUT_MS = 4000;
+const STREAM_TIMEOUT_MS = 15000;
+const MANIFEST_TIMEOUT_MS = 10000;
 
 function publicBase(req) {
   const configured = (process.env.PUBLIC_URL || "").replace(/\/$/, "");
@@ -52,11 +57,18 @@ function slugify(s) {
 }
 
 function decodeId(raw) {
-  try {
-    return decodeURIComponent(raw);
-  } catch (e) {
-    return raw;
+  // Some clients (Nuvio) send ids double-encoded; decode until stable.
+  let s = raw;
+  for (let i = 0; i < 2; i++) {
+    try {
+      const d = decodeURIComponent(s);
+      if (d === s) break;
+      s = d;
+    } catch (e) {
+      break;
+    }
   }
+  return s;
 }
 
 const TYPE_MAP = {
@@ -390,6 +402,16 @@ async function httpRequest(method, url, headers, body) {
 }
 
 function http_get(url, headers, cb) {
+  // Skystream plugins may pass { headers: {...} } (compiled Dart style) —
+  // unwrap it, otherwise the wrapper object itself becomes a header.
+  if (
+    headers &&
+    typeof headers === "object" &&
+    !Array.isArray(headers) &&
+    headers.headers &&
+    typeof headers.headers === "object"
+  )
+    headers = headers.headers;
   return httpRequest("GET", url, headers, null).then((res) => {
     if (typeof cb === "function") cb(res);
     return res;
@@ -846,22 +868,23 @@ async function getRawItem(plugin, metaId, timeoutMs) {
   return res.data;
 }
 
+function fallbackItem(item, id) {
+  const type = mapType(item.type);
+  return {
+    ...item,
+    url: item.url || item.id || id,
+    // Only movies get a synthetic Play episode; series keep their type so
+    // clients don't request /stream/movie/ for a series id.
+    ...(type === "movie" ? { episodes: [{ name: "Play", url: id }] } : {}),
+  };
+}
+
 function catalogItemFor(plugin, id) {
   for (const section of plugin.sections.values())
     for (const item of section.items)
-      if (item.url === id || item.id === id)
-        return {
-          ...item,
-          url: item.url || item.id || id,
-          episodes: [{ name: "Play", url: id }],
-        };
+      if (item.url === id || item.id === id) return fallbackItem(item, id);
   const item = plugin.catalogIndex.get(id);
-  if (item)
-    return {
-      ...item,
-      url: item.url || item.id || id,
-      episodes: [{ name: "Play", url: id }],
-    };
+  if (item) return fallbackItem(item, id);
   return null;
 }
 
@@ -949,6 +972,11 @@ async function handleCatalog(req, res, plugin, type, catalogId, base) {
     }
   } else {
     found = findSection(plugin, catalogId);
+    if (!found && (plugin.warming || plugin.sectionsTs === 0)) {
+      // Cold start / warmup still running: wait for it before declaring 404.
+      await warmPlugin(plugin);
+      found = findSection(plugin, catalogId);
+    }
     if (!found)
       return sendJson(res, 404, { error: "unknown catalog: " + catalogId });
     if (Date.now() - plugin.sectionsTs > CACHE_TTL_MS) await warmPlugin(plugin);
@@ -973,7 +1001,11 @@ async function handleCatalog(req, res, plugin, type, catalogId, base) {
 }
 
 async function handleMeta(req, res, plugin, type, id) {
-  let item = await getRawItem(plugin, id);
+  // Race the plugin's load() against a client-safe timeout. On timeout the
+  // catalog item (or a synthetic item) is served immediately; the load keeps
+  // running in the background and populates the cache, so the next request
+  // gets the full meta.
+  let item = await getRawItem(plugin, id, META_TIMEOUT_MS);
   if (!item) {
     item = catalogItemFor(plugin, id);
     if (!item) {
@@ -983,20 +1015,28 @@ async function handleMeta(req, res, plugin, type, id) {
         url: id,
         type,
         name: last || id,
-        episodes: [{ name: "Play", url: id }],
+        ...(type === "movie" ? { episodes: [{ name: "Play", url: id }] } : {}),
       };
     }
   }
   sendJson(res, 200, { meta: mapMeta(item) });
 }
 
-async function loadStreamsFor(plugin, id) {
-  const cached = plugin.streamCache.get(id);
-  if (cached && Date.now() - cached.ts < CACHE_TTL_MS) return cached.value;
-  const r = await callPlugin(plugin, "loadStreams", [id]);
-  const value = r.success && Array.isArray(r.data) ? r.data : [];
-  cachePut(plugin.streamCache, id, Date.now(), value);
-  return value;
+async function loadStreamsFor(plugin, id, timeoutMs) {
+  // No cache: plugins hand out short-lived signed URLs (moviblast verify=
+  // tokens die in <10s), so mint fresh on every request.
+  const r = timeoutMs
+    ? await Promise.race([
+        callPlugin(plugin, "loadStreams", [id]),
+        new Promise((r) =>
+          setTimeout(
+            () => r({ success: false, message: "timeout" }),
+            timeoutMs,
+          ),
+        ),
+      ])
+    : await callPlugin(plugin, "loadStreams", [id]);
+  return r.success && Array.isArray(r.data) ? r.data : [];
 }
 
 async function handleStream(req, res, plugin, type, id, base) {
@@ -1007,23 +1047,31 @@ async function handleStream(req, res, plugin, type, id, base) {
     const metaId = m[1];
     const season = +m[2];
     const episode = +m[3];
-    const item = await getRawItem(plugin, metaId);
+    const item = await getRawItem(plugin, metaId, STREAM_TIMEOUT_MS);
     if (item && Array.isArray(item.episodes)) {
       const idx = item.episodes.findIndex((e, i) => {
         const n = epNumbers(e, i);
         return n.season === season && n.episode === episode;
       });
       if (idx >= 0)
-        raw = await loadStreamsFor(plugin, item.episodes[idx].url || metaId);
+        raw = await loadStreamsFor(
+          plugin,
+          item.episodes[idx].url || metaId,
+          STREAM_TIMEOUT_MS,
+        );
     }
   }
   if (!raw.length) {
-    const item = await getRawItem(plugin, id);
+    const item = await getRawItem(plugin, id, STREAM_TIMEOUT_MS);
     if (item && Array.isArray(item.streams) && item.streams.length)
       raw = item.streams;
     else if (item && Array.isArray(item.episodes) && item.episodes.length)
-      raw = await loadStreamsFor(plugin, item.episodes[0].url || id);
-    else raw = await loadStreamsFor(plugin, id);
+      raw = await loadStreamsFor(
+        plugin,
+        item.episodes[0].url || id,
+        STREAM_TIMEOUT_MS,
+      );
+    else raw = await loadStreamsFor(plugin, id, STREAM_TIMEOUT_MS);
   }
   sendJson(res, 200, {
     streams: raw
@@ -1243,7 +1291,12 @@ async function handleRequest(req, res) {
     const warmed = warmPlugin(plugin).catch(() => {});
     if (plugin.sections.size === 0 && plugin.descriptor.catalogs?.length)
       return sendJson(res, 200, buildManifest(plugin));
-    await warmed;
+    // Slow getHome warmups must not hang the install request; respond with
+    // whatever sections exist and let the warmup finish in the background.
+    await Promise.race([
+      warmed,
+      new Promise((r) => setTimeout(r, MANIFEST_TIMEOUT_MS)),
+    ]);
     return sendJson(res, 200, buildManifest(plugin));
   }
 

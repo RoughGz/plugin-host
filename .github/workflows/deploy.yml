@@ -2,23 +2,46 @@ name: Deploy to BeamUp
 on:
   push:
     branches: [main]
+  workflow_dispatch: # manual "Deploy now" button
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Setup SSH
+      - name: Setup SSH key
+        env:
+          SSH_KEY: ${{ secrets.BEAMUP_SSH_KEY }}
         run: |
+          set -euo pipefail
           mkdir -p ~/.ssh
-          echo "${{ secrets.BEAMUP_SSH_KEY }}" > ~/.ssh/id_ed25519
+          # Secrets often get pasted with literal \n or CRLF line endings,
+          # which corrupts the key file ("error in libcrypto"). Normalize:
+          # strip quotes, CRLF, and convert literal \n to real newlines.
+          printf '%s' "$SSH_KEY" \
+            | tr -d '\r' \
+            | sed -e 's/^"//' -e 's/"$//' \
+            | sed 's/\\n/\n/g' \
+            > ~/.ssh/id_ed25519
+          # OpenSSH rejects keys without a trailing newline (GitHub strips
+          # trailing newlines from secrets), so ensure one.
+          printf '\n' >> ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
-          ssh-keyscan a.baby-beamup.club >> ~/.ssh/known_hosts
+          # Fail fast with a clear message if the key is unreadable.
+          if ! ssh-keygen -y -f ~/.ssh/id_ed25519 >/dev/null 2>&1; then
+            echo "::error::BEAMUP_SSH_KEY is not a valid private key. Re-set it in Settings > Secrets and variables > Actions: paste the FULL key including the BEGIN/END lines."
+            exit 1
+          fi
+          ssh-keyscan a.baby-beamup.club >> ~/.ssh/known_hosts 2>/dev/null || true
       - name: Deploy
         run: |
-          git remote add beamup dokku@a.baby-beamup.club:${{ vars.BEAMUP_APP_ID }}/${{ vars.BEAMUP_PROJECT_NAME }}
-          git push beamup HEAD:master --force
+          REMOTE="dokku@a.baby-beamup.club:${{ vars.BEAMUP_APP_ID }}/${{ vars.BEAMUP_PROJECT_NAME }}"
+          git remote remove beamup 2>/dev/null || true
+          git remote add beamup "$REMOTE"
+          GIT_SSH_COMMAND="ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes" \
+            git push beamup HEAD:master --force
       - name: Verify
         run: |
           sleep 30
-          curl -sf https://${{ vars.BEAMUP_APP_ID }}-${{ vars.BEAMUP_PROJECT_NAME }}.baby-beamup.club/ \
+          curl -sf "https://${{ vars.BEAMUP_APP_ID }}-${{ vars.BEAMUP_PROJECT_NAME }}.baby-beamup.club/" \
             && echo "Deployed OK" || echo "Warning: may still be starting up"

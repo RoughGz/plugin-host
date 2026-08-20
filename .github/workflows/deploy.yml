@@ -4,14 +4,19 @@ on:
     branches: [main]
   workflow_dispatch: # manual "Deploy now" button
 
+concurrency:
+  group: beamup-deploy
+  cancel-in-progress: true # rapid pushes cancel the stale run
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0 # dokku rejects shallow pushes
-      - name: Setup SSH key
+      - name: 🔑 Setup SSH key
         env:
           SSH_KEY: ${{ secrets.BEAMUP_SSH_KEY }}
         run: |
@@ -35,15 +40,30 @@ jobs:
             exit 1
           fi
           ssh-keyscan a.baby-beamup.club >> ~/.ssh/known_hosts 2>/dev/null || true
-      - name: Deploy
+      - name: 🚀 Deploy to BeamUp
         run: |
           REMOTE="dokku@a.baby-beamup.club:${{ secrets.BEAMUP_APP_ID }}/${{ secrets.BEAMUP_PROJECT_NAME }}"
           git remote remove beamup 2>/dev/null || true
           git remote add beamup "$REMOTE"
           GIT_SSH_COMMAND="ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes" \
             git push beamup HEAD:master --force
-      - name: Verify
+      - name: ✅ Verify deployment
         run: |
-          sleep 30
-          curl -sf "https://${{ secrets.BEAMUP_APP_ID }}-${{ secrets.BEAMUP_PROJECT_NAME }}.baby-beamup.club/" \
-            && echo "Deployed OK" || echo "Warning: may still be starting up"
+          URL="https://${{ secrets.BEAMUP_APP_ID }}-${{ secrets.BEAMUP_PROJECT_NAME }}.baby-beamup.club/"
+          for i in 1 2 3 4 5 6; do
+            if curl -sf --max-time 20 "$URL" >/dev/null 2>&1; then
+              STATUS="✅ live"
+              break
+            fi
+            sleep 10
+          done
+          STATUS="${STATUS:-⚠️ not responding yet (may still be starting)}"
+          echo "## 🚀 BeamUp deploy $STATUS" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| | |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **App URL** | [$URL]($URL) |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Commit** | \`${GITHUB_SHA:0:7}\` — ${{ github.event.head_commit.message }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Trigger** | ${{ github.event_name }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Time** | $(date -u '+%Y-%m-%d %H:%M UTC') |" >> "$GITHUB_STEP_SUMMARY"
+          echo "$STATUS"

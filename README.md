@@ -1,5 +1,7 @@
 # Plugin Host
 
+[![Deploy to BeamUp](https://github.com/RougheHz/plugin-host/actions/workflows/deploy.yml/badge.svg)](https://github.com/RougheHz/plugin-host/actions/workflows/deploy.yml)
+
 A Stremio addon that runs [Skystream](https://github.com/akashdh11/skystream)
 plugins in a sandboxed environment — **zero dependencies** (Node ≥ 18 built-ins
 only).
@@ -97,4 +99,8 @@ test.js            self-checks
 data/plugins.json  app-managed plugin state (gitignored)
 plugins/           one folder per plugin (plugin.js + plugin.json)
 ```
-deploy trigger
+
+## Deployment
+
+Auto-deploys to BeamUp on every push to `main` — see **[DEPLOY.md](DEPLOY.md)**
+for the full guide (setup, secrets, troubleshooting).
